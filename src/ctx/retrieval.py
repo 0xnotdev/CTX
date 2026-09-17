@@ -94,6 +94,8 @@ def fuse_ranked(
         ]
         if direct_terms:
             score += 2.0 + 0.1 * len(direct_terms)
+            if any(re.fullmatch(r"CP-\d+", term, re.IGNORECASE) for term in direct_terms):
+                score += 10.0
         score += int(source.provenance.authority) * 0.01
         score += source.provenance.priority * 0.00001
         result.append(

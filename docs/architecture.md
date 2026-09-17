@@ -55,5 +55,14 @@ SIGIR 2009 (<https://doi.org/10.1145/1571941.1572114>). `k=60` is the paper's co
 setting; it is recorded and evaluation-tested rather than claimed universally optimal.
 Generated candidates sort behind original sources.
 
+Context packs prioritize direct requirements, references, dependencies, interfaces/models,
+global/error/security constraints, acceptance/verification material, then small structural
+neighbors. The default token count is explicitly an estimate (`ceil(UTF-8 bytes / 4)`), and
+AST block maps permit only valid whole-block reductions. Fences and tables are never sliced.
+`POSSIBLE_CONFLICT` is intentionally conservative: it requires an overlapping exact technical
+identifier and one of a small deterministic contradictory phrase pairs (`must`/`must not`,
+enabled/disabled, allowed/prohibited, required/forbidden). It labels both exact sources and
+authorities and is **not** general natural-language contradiction detection or reconciliation.
+
 Dependency package licensing does **not** imply a model license; users must review model
 metadata before explicit download or redistribution.

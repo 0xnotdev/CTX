@@ -14,6 +14,8 @@ from ctx.config import (
 from ctx.embeddings import EmbeddingProvider
 from ctx.graph import extract_graph
 from ctx.models import (
+    Authority,
+    ContextPack,
     EdgeType,
     IndexStatus,
     ReferenceResult,
@@ -242,6 +244,26 @@ class ContextEngine:
             channels.append(("semantic", semantic))
         fused = fuse_ranked(query, classification, channels, bounded)
         return self._validate_hits(fused)
+
+    def get_context_pack(
+        self,
+        task: str,
+        token_budget: int,
+        *,
+        documents: set[str] | None = None,
+        authority_floor: Authority | None = None,
+    ) -> ContextPack:
+        from ctx.context_pack import build_context_pack
+
+        if len(task) > self.config.limits.max_query_chars:
+            raise ValueError("task exceeds configured max_query_chars")
+        return build_context_pack(
+            self,
+            task,
+            token_budget,
+            documents=documents,
+            authority_floor=authority_floor,
+        )
 
     def get_references(self, section_id: str, *, incoming: bool = False) -> list[ReferenceResult]:
         results = self.store.get_references(section_id, incoming=incoming)

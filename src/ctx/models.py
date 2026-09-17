@@ -149,6 +149,39 @@ class SourceItem(BaseModel):
     reason: str | None = None
 
 
+class ContextPackItem(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    source: SourceItem
+    reason: str
+    category: str
+    estimated_tokens: int
+    range_sha256: str
+
+
+class PossibleConflict(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    label: str = "POSSIBLE_CONFLICT"
+    identifier: str
+    reason: str
+    sources: tuple[SourceItem, SourceItem]
+
+
+class ContextPack(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    task: str
+    token_budget: int
+    estimated_tokens: int
+    token_count_method: str
+    items: tuple[ContextPackItem, ...]
+    omitted_relevant_sections: tuple[str, ...]
+    possible_conflicts: tuple[PossibleConflict, ...] = ()
+    index_version: int
+    retrieval_metadata: dict[str, str | int | bool]
+
+
 class ReferenceRecord(BaseModel):
     model_config = ConfigDict(frozen=True)
 
