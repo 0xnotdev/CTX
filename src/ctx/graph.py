@@ -120,7 +120,10 @@ def extract_graph(sections: list[GraphSection]) -> ExtractedGraph:
         for anchor in _LINK.findall(section.text):
             add(section.id, by_slug.get(anchor.casefold()), EdgeType.RELATED_SECTION, f"#{anchor}")
 
-        for dependency in _DEPENDENCY.findall(section.text):
+        dependency_values = list(_DEPENDENCY.findall(section.text))
+        if _slug(section.heading) in {"dependency", "dependencies"}:
+            dependency_values.append("\n".join(section.text.splitlines()[1:]))
+        for dependency in dependency_values:
             labels = [*_CP.findall(dependency), *_SECTION.findall(dependency)]
             labels.extend(_symbols(dependency))
             for label in sorted(set(labels)):

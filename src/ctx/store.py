@@ -14,6 +14,7 @@ from pathlib import Path
 import numpy as np
 from numpy.typing import NDArray
 
+from ctx.checkpoints import CheckpointMetadata
 from ctx.embeddings import cosine_scores
 from ctx.graph import ExtractedGraph, GraphSection
 from ctx.models import (
@@ -170,6 +171,10 @@ class SQLiteStore:
             "SELECT value FROM index_metadata WHERE key = ?", ("index_version",)
         ).fetchone()
         return int(row[0]) if row else 0
+
+    def touch_index(self) -> int:
+        with self.connection:
+            return self._increment_index_version(self.connection)
 
     def set_metadata(self, key: str, value: str) -> None:
         with self.connection:
@@ -673,6 +678,38 @@ class SQLiteStore:
             )
             for row in rows
         ]
+
+    def replace_checkpoints(self, checkpoints: tuple[CheckpointMetadata, ...]) -> None:
+        with self.connection:
+            self.connection.execute("DELETE FROM checkpoint_metadata")
+            self.connection.executemany(
+                "INSERT INTO checkpoint_metadata(section_id, checkpoint_id, title, fields_json) "
+                "VALUES(?, ?, ?, ?)",
+                (
+                    (
+                        checkpoint.root_section_id,
+                        checkpoint.checkpoint_id,
+                        checkpoint.title,
+                        checkpoint.model_dump_json(),
+                    )
+                    for checkpoint in checkpoints
+                ),
+            )
+
+    def get_checkpoint_metadata(self, checkpoint_id: str) -> CheckpointMetadata:
+        row = self.connection.execute(
+            "SELECT fields_json FROM checkpoint_metadata WHERE checkpoint_id=? COLLATE NOCASE",
+            (checkpoint_id,),
+        ).fetchone()
+        if row is None:
+            raise KeyError(f"checkpoint not found: {checkpoint_id}")
+        return CheckpointMetadata.model_validate_json(row[0])
+
+    def list_checkpoint_metadata(self) -> list[CheckpointMetadata]:
+        rows = self.connection.execute(
+            "SELECT fields_json FROM checkpoint_metadata ORDER BY checkpoint_id"
+        ).fetchall()
+        return [CheckpointMetadata.model_validate_json(row[0]) for row in rows]
 
     def chunks_needing_embeddings(self, model: str) -> list[tuple[str, str, str]]:
         rows = self.connection.execute(

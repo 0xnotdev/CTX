@@ -59,6 +59,12 @@ Context packs prioritize direct requirements, references, dependencies, interfac
 global/error/security constraints, acceptance/verification material, then small structural
 neighbors. The default token count is explicitly an estimate (`ceil(UTF-8 bytes / 4)`), and
 AST block maps permit only valid whole-block reductions. Fences and tables are never sliced.
+Checkpoint recognition is deterministic and extensible: recognized headings and canonical
+fields are stored as navigation metadata while exact root/child sections remain the response
+source. Optional `.ctx/checkpoints/CP-N.json` artifacts are bounded, hashed, labeled GENERATED,
+and kept in a separate `generated_artifact` field; source fields always win and artifacts are
+never interpreted as normative text.
+
 `POSSIBLE_CONFLICT` is intentionally conservative: it requires an overlapping exact technical
 identifier and one of a small deterministic contradictory phrase pairs (`must`/`must not`,
 enabled/disabled, allowed/prohibited, required/forbidden). It labels both exact sources and

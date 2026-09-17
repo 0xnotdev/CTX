@@ -2,8 +2,16 @@
 
 from __future__ import annotations
 
+import hashlib
+import re
 from pathlib import Path
 
+from ctx.checkpoints import (
+    CheckpointContext,
+    CheckpointResult,
+    load_generated_artifacts,
+    recognize_checkpoints,
+)
 from ctx.config import (
     ConfigError,
     DocumentConfig,
@@ -148,6 +156,20 @@ class ContextEngine:
         if graph_changed:
             self.store.replace_graph(extract_graph(self.store.graph_sections()))
 
+        artifacts = load_generated_artifacts(self.root, self.config.limits.max_file_bytes)
+        artifact_fingerprint = hashlib.sha256(
+            "".join(
+                f"{key}:{artifact.sha256}" for key, artifact in sorted(artifacts.items())
+            ).encode()
+        ).hexdigest()
+        artifacts_changed = self.store.get_metadata("checkpoint_artifacts") != artifact_fingerprint
+        if graph_changed or artifacts_changed:
+            checkpoints = recognize_checkpoints(self.store.graph_sections(), artifacts)
+            self.store.replace_checkpoints(checkpoints)
+            self.store.set_metadata("checkpoint_artifacts", artifact_fingerprint)
+            if artifacts_changed and not graph_changed:
+                self.store.touch_index()
+
         if self.embedder is not None:
             pending = self.store.chunks_needing_embeddings(self.embedder.identity)
             if pending:
@@ -244,6 +266,60 @@ class ContextEngine:
             channels.append(("semantic", semantic))
         fused = fuse_ranked(query, classification, channels, bounded)
         return self._validate_hits(fused)
+
+    def get_checkpoint(self, checkpoint_id: str) -> CheckpointResult:
+        normalized = checkpoint_id.strip().upper()
+        if not re.fullmatch(r"CP-\d+", normalized):
+            raise ValueError("checkpoint_id must have form CP-N")
+        metadata = self.store.get_checkpoint_metadata(normalized)
+        sources = tuple(self.get_section(section_id) for section_id in metadata.section_ids)
+        return CheckpointResult(metadata=metadata, sources=sources)
+
+    def get_checkpoint_context(
+        self, checkpoint_id: str, *, token_budget: int = 7_000
+    ) -> CheckpointContext:
+        checkpoint = self.get_checkpoint(checkpoint_id)
+        dependencies: list[ReferenceResult] = []
+        references: list[ReferenceResult] = []
+        interfaces: list[SourceItem] = []
+        for section_id in checkpoint.metadata.section_ids:
+            for result in self.store.get_references(section_id):
+                if result.edge.edge_type is EdgeType.DEPENDS_ON:
+                    dependencies.append(result)
+                elif result.edge.edge_type in {
+                    EdgeType.REFERENCES,
+                    EdgeType.RELATED_SECTION,
+                }:
+                    references.append(result)
+                elif result.edge.edge_type is EdgeType.USES_TYPE and result.target is not None:
+                    interfaces.append(result.target)
+        exact_text = "\n".join(source.text for source in checkpoint.sources)
+        named_errors = tuple(
+            sorted(set(re.findall(r"\b[A-Z][A-Z0-9]+(?:_[A-Z0-9]+)+\b", exact_text)))
+        )
+        security_rules = tuple(
+            hit.source
+            for hit in self.search("security constraint", limit=5)
+            if "security" in hit.source.text.casefold()
+        )
+        fields = checkpoint.metadata.fields
+        pack = self.get_context_pack(
+            f"Implement {checkpoint.metadata.checkpoint_id} — {checkpoint.metadata.title}",
+            token_budget,
+        )
+        unique_interfaces = {source.provenance.section_id: source for source in interfaces}
+        return CheckpointContext(
+            checkpoint=checkpoint,
+            dependencies=tuple(dependencies),
+            references=tuple(references),
+            interfaces_models=tuple(unique_interfaces.values()),
+            named_errors=named_errors,
+            security_rules=security_rules,
+            acceptance_criteria=fields.get("tests_acceptance_criteria", ()),
+            verification_commands=fields.get("verify", ()),
+            out_of_scope=fields.get("out_of_scope", ()),
+            context_pack=pack,
+        )
 
     def get_context_pack(
         self,
