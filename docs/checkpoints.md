@@ -7,4 +7,5 @@ its clean commit; later rows record concrete hashes because a commit cannot cont
 |---|---|---|---|
 | CP-00 | `b776774` | `pytest`; `ctx --help`; `ctx --version`; `ruff check .`; `ruff format --check .`; `mypy src` | 2 tests passed; CLI exits 0; lint, format, and strict types pass |
 | CP-01 | `18d879e` | `pytest tests/test_parser.py`; full `pytest`; lint/format/type | 6 parser and 8 total tests passed; AST sections reconstruct exact source |
-| CP-02 | `CP-02 store` | `pytest tests/test_store.py`; full `pytest`; lint/format/type | 4 store and 12 total tests passed; provenance, schema, path defenses verified |
+| CP-02 | `7e3d3d7` | `pytest tests/test_store.py`; full `pytest`; lint/format/type | 4 store and 12 total tests passed; provenance, schema, path defenses verified |
+| CP-03 | `CP-03 incremental` | `pytest tests/test_incremental.py`; full `pytest`; lint/format/type | 3 incremental and 15 total tests passed; zero-work sync, retained embedding, rename, delete, and stale guard verified |

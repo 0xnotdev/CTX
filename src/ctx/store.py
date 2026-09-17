@@ -10,7 +10,7 @@ from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 
-from ctx.models import Authority, DocumentRecord, ParsedDocument, Provenance, SourceItem
+from ctx.models import Authority, DocumentRecord, ParsedDocument, Provenance, SourceItem, SyncStats
 
 SCHEMA_VERSION = 1
 
@@ -199,15 +199,48 @@ class SQLiteStore:
             indexed_at=row["indexed_at"],
         )
 
+    def document_parser_version(self, document_id_value: str) -> str | None:
+        row = self.connection.execute(
+            "SELECT v.parser_version FROM document_versions v "
+            "JOIN documents d ON d.id=v.document_id "
+            "WHERE d.id=? AND v.sha256=d.current_sha256 "
+            "ORDER BY v.id DESC LIMIT 1",
+            (document_id_value,),
+        ).fetchone()
+        return str(row[0]) if row else None
+
     def remove_document(self, path: str) -> bool:
         with self.connection:
+            chunks = self.connection.execute(
+                "SELECT c.id FROM chunks c JOIN sections s ON s.id=c.section_id "
+                "JOIN documents d ON d.id=s.document_id WHERE d.path=?",
+                (path,),
+            ).fetchall()
+            self.connection.executemany(
+                "DELETE FROM chunks_fts WHERE chunk_id=?", ((row[0],) for row in chunks)
+            )
             cursor = self.connection.execute("DELETE FROM documents WHERE path = ?", (path,))
             if cursor.rowcount:
                 self._increment_index_version(self.connection)
             return cursor.rowcount > 0
 
+    def rename_document(self, old_path: str, new_path: str) -> DocumentRecord:
+        """Rename a same-content document while retaining its durable identity."""
+        with self.connection:
+            cursor = self.connection.execute(
+                "UPDATE documents SET path=? WHERE path=?", (new_path, old_path)
+            )
+            if not cursor.rowcount:
+                raise KeyError(f"document not found: {old_path}")
+            self._increment_index_version(self.connection)
+        return self.get_document_by_path(new_path)
+
     def replace_document(self, record: DocumentRecord, parsed: ParsedDocument) -> int:
-        """Atomically replace derived rows for one document and return index version."""
+        """Compatibility wrapper for incremental replacement."""
+        return self.sync_document(record, parsed).index_version
+
+    def sync_document(self, record: DocumentRecord, parsed: ParsedDocument) -> SyncStats:
+        """Update only changed structural material and preserve reusable embeddings."""
         now = datetime.now(UTC).isoformat()
         with self.transaction() as connection:
             version = connection.execute(
@@ -226,38 +259,89 @@ class SQLiteStore:
                 version_id = cursor.lastrowid
             else:
                 version_id = int(version[0])
-            old_chunk_ids = connection.execute(
-                "SELECT c.id FROM chunks c JOIN sections s ON s.id=c.section_id "
-                "WHERE s.document_id=?",
-                (record.id,),
+
+            existing_rows = connection.execute(
+                "SELECT id, sha256 FROM sections WHERE document_id=?", (record.id,)
             ).fetchall()
-            connection.executemany(
-                "DELETE FROM chunks_fts WHERE chunk_id=?",
-                ((row[0],) for row in old_chunk_ids),
-            )
-            connection.execute("DELETE FROM sections WHERE document_id=?", (record.id,))
-            for section in parsed.sections:
-                connection.execute(
-                    "INSERT INTO sections(id, document_id, document_version_id, ordinal, level, "
-                    "heading, heading_path, parent_id, start_line, end_line, text, sha256) "
-                    "VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    (
-                        section.id,
-                        record.id,
-                        version_id,
-                        section.ordinal,
-                        section.level,
-                        section.heading,
-                        json.dumps(section.heading_path, ensure_ascii=False),
-                        section.parent_id,
-                        section.start_line,
-                        section.end_line,
-                        section.text,
-                        section.sha256,
-                    ),
+            existing = {str(row["id"]): str(row["sha256"]) for row in existing_rows}
+            incoming = {section.id: section for section in parsed.sections}
+            removed = set(existing) - set(incoming)
+            added = set(incoming) - set(existing)
+            changed = {
+                identifier
+                for identifier in set(existing) & set(incoming)
+                if existing[identifier] != incoming[identifier].sha256
+            }
+            unchanged = set(existing) & set(incoming) - changed
+            chunks_removed = 0
+            embeddings_retained = 0
+
+            for section_id in removed | changed:
+                chunks = connection.execute(
+                    "SELECT id FROM chunks WHERE section_id=?", (section_id,)
+                ).fetchall()
+                chunks_removed += len(chunks)
+                connection.executemany(
+                    "DELETE FROM chunks_fts WHERE chunk_id=?", ((row[0],) for row in chunks)
                 )
-            headings = {section.id: section.heading for section in parsed.sections}
-            for chunk in parsed.chunks:
+                connection.execute("DELETE FROM chunks WHERE section_id=?", (section_id,))
+                connection.execute(
+                    'DELETE FROM "references" WHERE source_section_id=?', (section_id,)
+                )
+                connection.execute("DELETE FROM symbols WHERE section_id=?", (section_id,))
+                connection.execute(
+                    "DELETE FROM checkpoint_metadata WHERE section_id=?", (section_id,)
+                )
+            for section_id in removed:
+                connection.execute("DELETE FROM sections WHERE id=?", (section_id,))
+
+            # Avoid transient UNIQUE(document_id, ordinal) collisions during reordered updates.
+            connection.execute(
+                "UPDATE sections SET ordinal = -ordinal - 1 WHERE document_id=?", (record.id,)
+            )
+            for section in parsed.sections:
+                values = (
+                    version_id,
+                    section.ordinal,
+                    section.level,
+                    section.heading,
+                    json.dumps(section.heading_path, ensure_ascii=False),
+                    section.parent_id,
+                    section.start_line,
+                    section.end_line,
+                    section.text,
+                    section.sha256,
+                    section.id,
+                )
+                if section.id in existing:
+                    connection.execute(
+                        "UPDATE sections SET document_version_id=?, ordinal=?, level=?, "
+                        "heading=?, heading_path=?, parent_id=?, start_line=?, end_line=?, "
+                        "text=?, sha256=? WHERE id=?",
+                        values,
+                    )
+                else:
+                    connection.execute(
+                        "INSERT INTO sections(document_version_id, ordinal, level, heading, "
+                        "heading_path, parent_id, start_line, end_line, text, sha256, id, "
+                        "document_id) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        (*values, record.id),
+                    )
+
+            chunks_by_section = {chunk.section_id: chunk for chunk in parsed.chunks}
+            for section_id in unchanged:
+                chunk = chunks_by_section[section_id]
+                connection.execute(
+                    "UPDATE chunks SET start_line=?, end_line=? WHERE id=?",
+                    (chunk.start_line, chunk.end_line, chunk.id),
+                )
+                row = connection.execute(
+                    "SELECT COUNT(*) FROM embeddings WHERE chunk_id=? AND chunk_sha256=?",
+                    (chunk.id, chunk.sha256),
+                ).fetchone()
+                embeddings_retained += int(row[0])
+            for section_id in added | changed:
+                chunk = chunks_by_section[section_id]
                 connection.execute(
                     "INSERT INTO chunks(id, section_id, ordinal, start_line, end_line, text, "
                     "sha256) VALUES(?, ?, ?, ?, ?, ?, ?)",
@@ -274,13 +358,25 @@ class SQLiteStore:
                 connection.execute(
                     "INSERT INTO chunks_fts(chunk_id, section_id, heading, text) "
                     "VALUES(?, ?, ?, ?)",
-                    (chunk.id, chunk.section_id, headings[chunk.section_id], chunk.text),
+                    (chunk.id, chunk.section_id, incoming[section_id].heading, chunk.text),
                 )
             connection.execute(
                 "UPDATE documents SET current_sha256=?, indexed_at=? WHERE id=?",
                 (parsed.sha256, now, record.id),
             )
-            return self._increment_index_version(connection)
+            index_version = self._increment_index_version(connection)
+            return SyncStats(
+                sections_added=len(added),
+                sections_changed=len(changed),
+                sections_unchanged=len(unchanged),
+                sections_removed=len(removed),
+                chunks_added=len(added),
+                chunks_changed=len(changed),
+                chunks_unchanged=len(unchanged),
+                chunks_removed=chunks_removed,
+                embeddings_retained=embeddings_retained,
+                index_version=index_version,
+            )
 
     @staticmethod
     def _increment_index_version(connection: sqlite3.Connection) -> int:

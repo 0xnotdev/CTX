@@ -103,6 +103,40 @@ class Provenance(BaseModel):
     index_version: int
 
 
+class SyncStats(BaseModel):
+    """Observable work performed by an index/sync operation."""
+
+    model_config = ConfigDict(frozen=True)
+
+    documents_added: int = 0
+    documents_changed: int = 0
+    documents_unchanged: int = 0
+    documents_removed: int = 0
+    documents_renamed: int = 0
+    sections_added: int = 0
+    sections_changed: int = 0
+    sections_unchanged: int = 0
+    sections_removed: int = 0
+    chunks_added: int = 0
+    chunks_changed: int = 0
+    chunks_unchanged: int = 0
+    chunks_removed: int = 0
+    embeddings_retained: int = 0
+    index_version: int = 0
+
+
+class IndexStatus(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    index_version: int
+    configured_documents: int
+    indexed_documents: int
+    stale_documents: tuple[str, ...]
+    missing_documents: tuple[str, ...]
+    parser_version: str
+    embedding_model: str
+
+
 class SourceItem(BaseModel):
     """Exact source section plus complete provenance."""
 
