@@ -72,6 +72,48 @@ class Chunk(BaseModel):
     sha256: str
 
 
+class DocumentRecord(BaseModel):
+    """Configured source document stored in the index."""
+
+    model_config = ConfigDict(frozen=True)
+
+    id: str
+    path: str
+    authority: Authority
+    priority: int
+    sha256: str | None = None
+    indexed_at: str | None = None
+
+
+class Provenance(BaseModel):
+    """Required provenance accompanying every source-bearing response."""
+
+    model_config = ConfigDict(frozen=True)
+
+    document_id: str
+    document_path: str
+    document_sha256: str
+    authority: Authority
+    priority: int
+    section_id: str
+    heading_path: tuple[str, ...]
+    start_line: int
+    end_line: int
+    section_sha256: str
+    index_version: int
+
+
+class SourceItem(BaseModel):
+    """Exact source section plus complete provenance."""
+
+    model_config = ConfigDict(frozen=True)
+
+    text: str
+    provenance: Provenance
+    score: float | None = None
+    reason: str | None = None
+
+
 class ParsedDocument(BaseModel):
     """Deterministic structural parse of a Markdown source."""
 
