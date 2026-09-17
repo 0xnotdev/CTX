@@ -11,6 +11,7 @@ from ctx.config import (
     load_config,
     read_source,
 )
+from ctx.embeddings import EmbeddingProvider
 from ctx.models import IndexStatus, SearchHit, SourceItem, SyncStats
 from ctx.parser import PARSER_VERSION, parse_markdown, sha256_text
 from ctx.store import SQLiteStore
@@ -29,10 +30,11 @@ class StaleIndexError(RuntimeError):
 class ContextEngine:
     """Workspace-scoped indexing and retrieval facade."""
 
-    def __init__(self, root: Path):
+    def __init__(self, root: Path, *, embedder: EmbeddingProvider | None = None):
         self.root = root.resolve(strict=True)
         self.config = load_config(self.root)
         self.store = SQLiteStore(database_path(self.root))
+        self.embedder = embedder
 
     def close(self) -> None:
         self.store.close()
@@ -91,6 +93,7 @@ class ContextEngine:
             "chunks_unchanged": 0,
             "chunks_removed": 0,
             "embeddings_retained": 0,
+            "embeddings_created": 0,
         }
         for document in self.config.documents:
             was_known = document.path in existing
@@ -121,6 +124,19 @@ class ContextEngine:
             if record.path not in configured_paths:
                 self.store.remove_document(record.path)
                 totals["documents_removed"] += 1
+
+        if self.embedder is not None:
+            pending = self.store.chunks_needing_embeddings(self.embedder.identity)
+            if pending:
+                matrix = self.embedder.embed_documents([row[1] for row in pending])
+                if matrix.shape != (len(pending), self.embedder.dimensions):
+                    raise RuntimeError("embedding backend returned unexpected dimensions")
+                rows = [
+                    (chunk_id, chunk_hash, matrix[index])
+                    for index, (chunk_id, _text, chunk_hash) in enumerate(pending)
+                ]
+                self.store.save_embeddings(self.embedder.identity, self.embedder.dimensions, rows)
+                totals["embeddings_created"] = len(rows)
 
         return SyncStats(**totals, index_version=self.store.index_version())
 

@@ -122,6 +122,7 @@ class SyncStats(BaseModel):
     chunks_unchanged: int = 0
     chunks_removed: int = 0
     embeddings_retained: int = 0
+    embeddings_created: int = 0
     index_version: int = 0
 
 

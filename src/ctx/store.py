@@ -11,6 +11,9 @@ from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 
+import numpy as np
+from numpy.typing import NDArray
+
 from ctx.models import (
     Authority,
     DocumentRecord,
@@ -491,6 +494,61 @@ class SQLiteStore:
             )
         )
         return hits[:limit]
+
+    def chunks_needing_embeddings(self, model: str) -> list[tuple[str, str, str]]:
+        rows = self.connection.execute(
+            "SELECT c.id, c.text, c.sha256 FROM chunks c LEFT JOIN embeddings e "
+            "ON e.chunk_id=c.id WHERE e.chunk_id IS NULL OR e.model<>? "
+            "OR e.chunk_sha256<>c.sha256 ORDER BY c.id",
+            (model,),
+        ).fetchall()
+        return [(str(row[0]), str(row[1]), str(row[2])) for row in rows]
+
+    def save_embeddings(
+        self,
+        model: str,
+        dimensions: int,
+        rows: list[tuple[str, str, NDArray[np.float32]]],
+    ) -> int:
+        with self.connection:
+            self.connection.executemany(
+                "INSERT INTO embeddings(chunk_id, model, dimensions, vector, chunk_sha256) "
+                "VALUES(?, ?, ?, ?, ?) ON CONFLICT(chunk_id) DO UPDATE SET "
+                "model=excluded.model, dimensions=excluded.dimensions, vector=excluded.vector, "
+                "chunk_sha256=excluded.chunk_sha256",
+                (
+                    (
+                        chunk_id,
+                        model,
+                        dimensions,
+                        np.asarray(vector, dtype="<f4").tobytes(),
+                        chunk_hash,
+                    )
+                    for chunk_id, chunk_hash, vector in rows
+                ),
+            )
+            self.connection.execute(
+                "INSERT INTO index_metadata(key, value) VALUES('embedding_model', ?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                (model,),
+            )
+            self.connection.execute(
+                "INSERT INTO index_metadata(key, value) VALUES('embedding_dimensions', ?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                (str(dimensions),),
+            )
+            return self._increment_index_version(self.connection)
+
+    def load_embeddings(self, model: str) -> tuple[list[str], NDArray[np.float32]]:
+        rows = self.connection.execute(
+            "SELECT chunk_id, dimensions, vector FROM embeddings WHERE model=? ORDER BY chunk_id",
+            (model,),
+        ).fetchall()
+        if not rows:
+            return [], np.empty((0, 0), dtype=np.float32)
+        dimensions = int(rows[0]["dimensions"])
+        vectors = [np.frombuffer(row["vector"], dtype="<f4", count=dimensions) for row in rows]
+        return [str(row["chunk_id"]) for row in rows], np.stack(vectors)
 
     def section_ids(self, document_id_value: str | None = None) -> list[str]:
         if document_id_value is None:

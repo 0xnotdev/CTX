@@ -34,6 +34,15 @@ Metadata/docs: [Pydantic](https://pypi.org/project/pydantic/),
 [MCP](https://pypi.org/project/mcp/), and [pytest](https://pypi.org/project/pytest/).
 No LangChain, LlamaIndex, vector server, cloud API, or paid dependency is used.
 
-Embedding model selection, measurements, and model-specific license terms are documented at
-CP-05. Dependency package licensing does **not** imply a model license; users must review model
+## Local embedding decision
+
+The production default is `BAAI/bge-small-en-v1.5` (384 dimensions) through FastEmbed's local
+ONNX CPU runtime. Model download is explicit; cached operation sets `local_files_only`, and no
+external embedding API or API key exists. Model identity and dimensions are persisted beside
+each vector. The model is MIT licensed, independently of FastEmbed's Apache-2.0 package license.
+Selection evidence, sources, measured quality figures, and our NumPy brute-force measurement
+are in [`benchmarks/embedding_selection.md`](../benchmarks/embedding_selection.md). A
+stable hash fixture keeps ordinary tests network-free.
+
+Dependency package licensing does **not** imply a model license; users must review model
 metadata before explicit download or redistribution.

@@ -41,8 +41,8 @@ class LimitsConfig(BaseModel):
 class EmbeddingConfig(BaseModel):
     model_config = ConfigDict(frozen=True)
 
-    backend: str = "hash-test"
-    model: str = "sentence-transformers/all-MiniLM-L6-v2"
+    backend: str = "fastembed"
+    model: str = "BAAI/bge-small-en-v1.5"
 
 
 class WorkspaceConfig(BaseModel):
