@@ -70,5 +70,11 @@ identifier and one of a small deterministic contradictory phrase pairs (`must`/`
 enabled/disabled, allowed/prohibited, required/forbidden). It labels both exact sources and
 authorities and is **not** general natural-language contradiction detection or reconciliation.
 
+The MCP adapter uses the official Python SDK's FastMCP 1.x API over local stdio. Version 2
+renamed FastMCP and is intentionally excluded until a deliberate adapter migration; this is why
+the dependency is bounded `<2`. Every tool delegates to `ContextEngine`, applies typed input and
+configured response bounds, and returns Markdown/HTML/links/scripts only as inert JSON string
+data. There is no execution path in the server.
+
 Dependency package licensing does **not** imply a model license; users must review model
 metadata before explicit download or redistribution.

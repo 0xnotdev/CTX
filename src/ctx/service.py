@@ -229,6 +229,43 @@ class ContextEngine:
                 checked.add(path)
         return hits
 
+    def document_outline(self, path: str) -> list[SourceItem]:
+        items = self.store.document_sections(path)
+        self._validate_hits(
+            [SearchHit(source=item, score=0, channels=("outline",)) for item in items]
+        )
+        return items
+
+    def get_lines(self, path: str, start_line: int, end_line: int) -> list[SourceItem]:
+        if start_line < 1 or end_line < start_line:
+            raise ValueError("invalid one-based line range")
+        if end_line - start_line + 1 > 2_000:
+            raise ValueError("line range exceeds safe maximum of 2000 lines")
+        document = self._configured(path)
+        current = read_source(self.root, document, self.config.limits)
+        record = self.store.get_document_by_path(path)
+        if record.sha256 != sha256_text(current):
+            raise StaleIndexError(path)
+        lines = current.splitlines(keepends=True)
+        if end_line > len(lines):
+            raise ValueError("line range exceeds document length")
+        results: list[SourceItem] = []
+        for item in self.store.document_sections(path):
+            start = max(start_line, item.provenance.start_line)
+            end = min(end_line, item.provenance.end_line)
+            if start > end:
+                continue
+            text = "".join(lines[start - 1 : end])
+            provenance = item.provenance.model_copy(update={"start_line": start, "end_line": end})
+            results.append(SourceItem(text=text, provenance=provenance, reason="exact line range"))
+        return results
+
+    def search_exact(self, query: str, *, limit: int = 10) -> list[SearchHit]:
+        if not query.strip() or len(query) > self.config.limits.max_query_chars:
+            raise ValueError("exact query is empty or exceeds max_query_chars")
+        bounded = min(max(limit, 1), self.config.limits.max_results)
+        return self._validate_hits(self.store.structural_search((query.strip(),), bounded))
+
     def search_lexical(
         self, query: str, *, limit: int = 10, auto_sync: bool = False
     ) -> list[SearchHit]:

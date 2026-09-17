@@ -20,7 +20,7 @@ dependencies = [
 
 [project.optional-dependencies]
 embeddings = ["fastembed>=0.7,<1"]
-mcp = ["mcp>=1.20,<3"]
+mcp = ["mcp>=1.20,<2"]
 dev = [
   "build>=1.2,<2",
   "mypy>=1.15,<2",

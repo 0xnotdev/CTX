@@ -766,6 +766,22 @@ class SQLiteStore:
         vectors = [np.frombuffer(row["vector"], dtype="<f4", count=dimensions) for row in rows]
         return [str(row["chunk_id"]) for row in rows], np.stack(vectors)
 
+    def document_sections(self, path: str) -> list[SourceItem]:
+        rows = self.connection.execute(
+            "SELECT s.*, d.path, d.authority, d.priority, d.current_sha256 "
+            "FROM sections s JOIN documents d ON d.id=s.document_id "
+            "WHERE d.path=? ORDER BY s.ordinal",
+            (path,),
+        ).fetchall()
+        if (
+            not rows
+            and not self.connection.execute(
+                "SELECT 1 FROM documents WHERE path=?", (path,)
+            ).fetchone()
+        ):
+            raise KeyError(f"document not found: {path}")
+        return [self._source_item(row) for row in rows]
+
     def section_ids(self, document_id_value: str | None = None) -> list[str]:
         if document_id_value is None:
             rows = self.connection.execute(
