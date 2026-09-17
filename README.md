@@ -44,4 +44,5 @@ mypy src
 ```
 
 Apache-2.0 licensed. Third-party and embedding-model license considerations are recorded in
-[`docs/architecture.md`](docs/architecture.md).
+[`docs/architecture.md`](docs/architecture.md); measured V0 quality, scale, and security results
+are in [`docs/evaluation.md`](docs/evaluation.md).

@@ -170,6 +170,9 @@ def build_context_pack(
 
     def add(source: SourceItem, category: str, reason: str) -> None:
         nonlocal sequence
+        # Graph rows are navigation-only; re-enter the shared exact-source stale guard before
+        # any candidate can become source-bearing output.
+        source = engine.get_section(source.provenance.section_id)
         if documents is not None and source.provenance.document_path not in documents:
             return
         if authority_floor is not None and source.provenance.authority < authority_floor:
@@ -187,18 +190,34 @@ def build_context_pack(
     for rank, hit in enumerate(direct, start=1):
         add(hit.source, "direct_requirement", f"direct hybrid requirement match rank {rank}")
 
+    categories = {
+        EdgeType.REFERENCES: ("direct_reference", "explicit source reference"),
+        EdgeType.DEPENDS_ON: ("explicit_dependency", "declared dependency"),
+        EdgeType.USES_TYPE: ("interface_or_model", "referenced interface/model"),
+        EdgeType.PARENT_OF: ("neighbor_context", "adjacent child section"),
+        EdgeType.CHILD_OF: ("neighbor_context", "containing parent section"),
+        EdgeType.RELATED_SECTION: ("direct_reference", "linked related section"),
+    }
+    checkpoint_children: list[SourceItem] = []
     for hit in direct[:4]:
         for reference in engine.store.get_references(hit.source.provenance.section_id):
             if reference.target is None:
                 continue
-            categories = {
-                EdgeType.REFERENCES: ("direct_reference", "explicit source reference"),
-                EdgeType.DEPENDS_ON: ("explicit_dependency", "declared dependency"),
-                EdgeType.USES_TYPE: ("interface_or_model", "referenced interface/model"),
-                EdgeType.PARENT_OF: ("neighbor_context", "adjacent child section"),
-                EdgeType.CHILD_OF: ("neighbor_context", "containing parent section"),
-                EdgeType.RELATED_SECTION: ("direct_reference", "linked related section"),
-            }
+            category, reason = categories[reference.edge.edge_type]
+            add(reference.target, category, f"{reason}: {reference.edge.label}")
+            if reference.edge.edge_type is EdgeType.PARENT_OF:
+                checkpoint_children.append(reference.target)
+    # Checkpoint field sections often carry dependencies/models beneath the root. Traverse that
+    # one explicit structural level rather than relying on vector proximity.
+    for child in checkpoint_children:
+        for reference in engine.store.get_references(child.provenance.section_id):
+            if reference.target is None or reference.edge.edge_type not in {
+                EdgeType.DEPENDS_ON,
+                EdgeType.REFERENCES,
+                EdgeType.USES_TYPE,
+                EdgeType.RELATED_SECTION,
+            }:
+                continue
             category, reason = categories[reference.edge.edge_type]
             add(reference.target, category, f"{reason}: {reference.edge.label}")
 

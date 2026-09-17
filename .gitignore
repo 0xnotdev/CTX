@@ -1,4 +1,5 @@
 .venv/
+.smoke-venv/
 .ctx/
 __pycache__/
 *.py[cod]
