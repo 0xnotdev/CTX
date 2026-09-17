@@ -44,5 +44,16 @@ Selection evidence, sources, measured quality figures, and our NumPy brute-force
 are in [`benchmarks/embedding_selection.md`](../benchmarks/embedding_selection.md). A
 stable hash fixture keeps ordinary tests network-free.
 
+## Hybrid retrieval
+
+Queries are deterministically classified for checkpoint/section IDs, identifier shapes, paths,
+and quoted phrases. Structural, FTS5/BM25, and local cosine rankings are combined with
+reciprocal-rank fusion using `k=60`, then exact-heading/direct-identifier, authority, and
+priority boosts plus stable provenance tie-breaking. RRF is based on Cormack, Clarke, and
+Büttcher, *Reciprocal Rank Fusion outperforms Condorcet and individual Rank Learning Methods*,
+SIGIR 2009 (<https://doi.org/10.1145/1571941.1572114>). `k=60` is the paper's commonly reported
+setting; it is recorded and evaluation-tested rather than claimed universally optimal.
+Generated candidates sort behind original sources.
+
 Dependency package licensing does **not** imply a model license; users must review model
 metadata before explicit download or redistribution.

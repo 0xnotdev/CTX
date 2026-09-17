@@ -14,6 +14,7 @@ from ctx.config import (
 from ctx.embeddings import EmbeddingProvider
 from ctx.models import IndexStatus, SearchHit, SourceItem, SyncStats
 from ctx.parser import PARSER_VERSION, parse_markdown, sha256_text
+from ctx.retrieval import classify_query, fuse_ranked
 from ctx.store import SQLiteStore
 
 
@@ -171,17 +172,7 @@ class ContextEngine:
             embedding_model=self.store.get_metadata("embedding_model") or "none",
         )
 
-    def search_lexical(
-        self, query: str, *, limit: int = 10, auto_sync: bool = False
-    ) -> list[SearchHit]:
-        if not query.strip():
-            return []
-        if len(query) > self.config.limits.max_query_chars:
-            raise ValueError("query exceeds configured max_query_chars")
-        bounded = min(max(limit, 1), self.config.limits.max_results)
-        if auto_sync:
-            self.sync_workspace()
-        hits = self.store.lexical_search(query, bounded)
+    def _validate_hits(self, hits: list[SearchHit]) -> list[SearchHit]:
         # Validate all documents before returning any possibly stale source text.
         checked: set[str] = set()
         for hit in hits:
@@ -193,6 +184,44 @@ class ContextEngine:
                     raise StaleIndexError(path)
                 checked.add(path)
         return hits
+
+    def search_lexical(
+        self, query: str, *, limit: int = 10, auto_sync: bool = False
+    ) -> list[SearchHit]:
+        if not query.strip():
+            return []
+        if len(query) > self.config.limits.max_query_chars:
+            raise ValueError("query exceeds configured max_query_chars")
+        bounded = min(max(limit, 1), self.config.limits.max_results)
+        if auto_sync:
+            self.sync_workspace()
+        return self._validate_hits(self.store.lexical_search(query, bounded))
+
+    def search(self, query: str, *, limit: int = 10, auto_sync: bool = False) -> list[SearchHit]:
+        """Run structural, BM25, and available local semantic retrieval, then fuse."""
+        if not query.strip():
+            return []
+        if len(query) > self.config.limits.max_query_chars:
+            raise ValueError("query exceeds configured max_query_chars")
+        if auto_sync:
+            self.sync_workspace()
+        bounded = min(max(limit, 1), self.config.limits.max_results)
+        candidates = min(max(bounded * 4, 20), self.config.limits.max_results)
+        classification = classify_query(query)
+        structural_terms = tuple(dict.fromkeys((query.strip(), *classification.structural_terms)))
+        structural = self.store.structural_search(structural_terms, candidates)
+        lexical = self.store.lexical_search(query, candidates)
+        channels: list[tuple[str, list[SearchHit]]] = [
+            ("structural", structural),
+            ("bm25", lexical),
+        ]
+        if self.embedder is not None:
+            semantic = self.store.semantic_search(
+                self.embedder.embed_query(query), self.embedder.identity, candidates
+            )
+            channels.append(("semantic", semantic))
+        fused = fuse_ranked(query, classification, channels, bounded)
+        return self._validate_hits(fused)
 
     def get_section(self, section_id: str, *, auto_sync: bool = False) -> SourceItem:
         item = self.store.get_section(section_id)

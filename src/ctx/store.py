@@ -14,6 +14,7 @@ from pathlib import Path
 import numpy as np
 from numpy.typing import NDArray
 
+from ctx.embeddings import cosine_scores
 from ctx.models import (
     Authority,
     DocumentRecord,
@@ -428,6 +429,90 @@ class SQLiteStore:
         if row is None:
             raise KeyError(f"section not found: {section_id}")
         return self._source_item(row)
+
+    def structural_search(self, terms: tuple[str, ...], limit: int = 10) -> list[SearchHit]:
+        """Find direct heading, identifier, section-mark, and path matches."""
+        rows_by_section: dict[str, sqlite3.Row] = {}
+        matched: dict[str, set[str]] = {}
+        for term in terms:
+            rows = self.connection.execute(
+                "SELECT s.*, d.path, d.authority, d.priority, d.current_sha256, "
+                "CASE WHEN s.heading=? COLLATE NOCASE THEN 0 "
+                "WHEN s.heading LIKE ? ESCAPE '\\' THEN 1 ELSE 2 END AS structural_rank "
+                "FROM sections s JOIN documents d ON d.id=s.document_id "
+                "WHERE s.heading=? COLLATE NOCASE OR s.heading LIKE ? ESCAPE '\\' "
+                "OR instr(s.text, ?) > 0 OR d.path=? ORDER BY structural_rank, d.path, s.ordinal "
+                "LIMIT ?",
+                (term, self._like_prefix(term), term, self._like_prefix(term), term, term, 100),
+            ).fetchall()
+            for row in rows:
+                identifier = str(row["id"])
+                previous = rows_by_section.get(identifier)
+                if previous is None or int(row["structural_rank"]) < int(
+                    previous["structural_rank"]
+                ):
+                    rows_by_section[identifier] = row
+                matched.setdefault(identifier, set()).add(term)
+        ordered = sorted(
+            rows_by_section.values(),
+            key=lambda row: (
+                int(row["structural_rank"]),
+                str(row["path"]),
+                int(row["ordinal"]),
+                str(row["id"]),
+            ),
+        )
+        return [
+            SearchHit(
+                source=self._source_item(row),
+                score=float(100 - int(row["structural_rank"])),
+                channels=("structural",),
+                matched_terms=tuple(sorted(matched[str(row["id"])])),
+            )
+            for row in ordered[:limit]
+        ]
+
+    @staticmethod
+    def _like_prefix(term: str) -> str:
+        escaped = term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        return escaped + "%"
+
+    def semantic_search(
+        self,
+        query_vector: NDArray[np.float32],
+        model: str,
+        limit: int = 10,
+    ) -> list[SearchHit]:
+        chunk_ids, matrix = self.load_embeddings(model)
+        if not chunk_ids:
+            return []
+        scores = cosine_scores(query_vector, matrix)
+        ranked = sorted(
+            range(len(chunk_ids)),
+            key=lambda index: (-float(scores[index]), chunk_ids[index]),
+        )
+        hits: list[SearchHit] = []
+        seen: set[str] = set()
+        for index in ranked:
+            row = self.connection.execute(
+                "SELECT s.*, d.path, d.authority, d.priority, d.current_sha256 "
+                "FROM chunks c JOIN sections s ON s.id=c.section_id "
+                "JOIN documents d ON d.id=s.document_id WHERE c.id=?",
+                (chunk_ids[index],),
+            ).fetchone()
+            if row is None or str(row["id"]) in seen:
+                continue
+            seen.add(str(row["id"]))
+            hits.append(
+                SearchHit(
+                    source=self._source_item(row),
+                    score=float(scores[index]),
+                    channels=("semantic",),
+                )
+            )
+            if len(hits) >= limit:
+                break
+        return hits
 
     def lexical_search(self, query: str, limit: int = 10) -> list[SearchHit]:
         """Run parameterized FTS5/BM25 with deterministic exact and authority boosts."""
