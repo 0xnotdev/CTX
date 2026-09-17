@@ -4,13 +4,22 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 
-from ctx.models import Authority, DocumentRecord, ParsedDocument, Provenance, SourceItem, SyncStats
+from ctx.models import (
+    Authority,
+    DocumentRecord,
+    ParsedDocument,
+    Provenance,
+    SearchHit,
+    SourceItem,
+    SyncStats,
+)
 
 SCHEMA_VERSION = 1
 
@@ -389,14 +398,7 @@ class SQLiteStore:
         )
         return version
 
-    def get_section(self, section_id: str) -> SourceItem:
-        row = self.connection.execute(
-            "SELECT s.*, d.path, d.authority, d.priority, d.current_sha256 "
-            "FROM sections s JOIN documents d ON d.id=s.document_id WHERE s.id=?",
-            (section_id,),
-        ).fetchone()
-        if row is None:
-            raise KeyError(f"section not found: {section_id}")
+    def _source_item(self, row: sqlite3.Row) -> SourceItem:
         return SourceItem(
             text=row["text"],
             provenance=Provenance(
@@ -413,6 +415,82 @@ class SQLiteStore:
                 index_version=self.index_version(),
             ),
         )
+
+    def get_section(self, section_id: str) -> SourceItem:
+        row = self.connection.execute(
+            "SELECT s.*, d.path, d.authority, d.priority, d.current_sha256 "
+            "FROM sections s JOIN documents d ON d.id=s.document_id WHERE s.id=?",
+            (section_id,),
+        ).fetchone()
+        if row is None:
+            raise KeyError(f"section not found: {section_id}")
+        return self._source_item(row)
+
+    def lexical_search(self, query: str, limit: int = 10) -> list[SearchHit]:
+        """Run parameterized FTS5/BM25 with deterministic exact and authority boosts."""
+        terms = re.findall(r"[\w][\w.@/-]*", query, flags=re.UNICODE)
+        if not terms or limit < 1:
+            return []
+        expression = " OR ".join(f'"{term.replace(chr(34), chr(34) * 2)}"' for term in terms)
+        rows = self.connection.execute(
+            "SELECT s.*, d.path, d.authority, d.priority, d.current_sha256, "
+            "bm25(chunks_fts, 0.0, 0.0, 8.0, 1.0) AS lexical_rank "
+            "FROM chunks_fts JOIN sections s ON s.id=chunks_fts.section_id "
+            "JOIN documents d ON d.id=s.document_id WHERE chunks_fts MATCH ? "
+            "ORDER BY lexical_rank, d.path, s.ordinal LIMIT ?",
+            (expression, min(limit * 8, 400)),
+        ).fetchall()
+        # Exact case-sensitive identifier fallback handles tokenizer edge cases such as @1.
+        exact_rows = self.connection.execute(
+            "SELECT s.*, d.path, d.authority, d.priority, d.current_sha256, "
+            "0.0 AS lexical_rank FROM sections s JOIN documents d ON d.id=s.document_id "
+            "WHERE instr(s.heading, ?) > 0 OR instr(s.text, ?) > 0 "
+            "ORDER BY d.path, s.ordinal LIMIT ?",
+            (query, query, min(limit * 4, 200)),
+        ).fetchall()
+        by_section: dict[str, sqlite3.Row] = {}
+        for row in [*rows, *exact_rows]:
+            by_section.setdefault(str(row["id"]), row)
+
+        query_folded = query.strip().casefold()
+        identifier = re.compile(rf"(?<![\w]){re.escape(query.strip())}(?![\w])")
+        hits: list[SearchHit] = []
+        for row in by_section.values():
+            authority = Authority(row["authority"])
+            exact_heading = str(row["heading"]).strip().casefold() == query_folded
+            exact_identifier = bool(query.strip()) and bool(identifier.search(str(row["text"])))
+            authority_score = (
+                -1_000_000.0 if authority is Authority.GENERATED else int(authority) * 1_000
+            )
+            score = (
+                -float(row["lexical_rank"])
+                + authority_score
+                + int(row["priority"]) * 2
+                + (10_000 if exact_heading else 0)
+                + (5_000 if exact_identifier else 0)
+            )
+            matched = tuple(
+                term for term in terms if term.casefold() in str(row["text"]).casefold()
+            )
+            hits.append(
+                SearchHit(
+                    source=self._source_item(row),
+                    score=score,
+                    channels=("bm25",),
+                    matched_terms=matched,
+                )
+            )
+        hits.sort(
+            key=lambda hit: (
+                -hit.score,
+                -int(hit.source.provenance.authority),
+                -hit.source.provenance.priority,
+                hit.source.provenance.document_path,
+                hit.source.provenance.start_line,
+                hit.source.provenance.section_id,
+            )
+        )
+        return hits[:limit]
 
     def section_ids(self, document_id_value: str | None = None) -> list[str]:
         if document_id_value is None:

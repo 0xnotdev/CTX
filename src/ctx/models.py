@@ -148,6 +148,17 @@ class SourceItem(BaseModel):
     reason: str | None = None
 
 
+class SearchHit(BaseModel):
+    """Ranked authoritative section returned by one or more retrieval channels."""
+
+    model_config = ConfigDict(frozen=True)
+
+    source: SourceItem
+    score: float
+    channels: tuple[str, ...]
+    matched_terms: tuple[str, ...] = ()
+
+
 class ParsedDocument(BaseModel):
     """Deterministic structural parse of a Markdown source."""
 

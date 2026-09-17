@@ -11,7 +11,7 @@ from ctx.config import (
     load_config,
     read_source,
 )
-from ctx.models import IndexStatus, SourceItem, SyncStats
+from ctx.models import IndexStatus, SearchHit, SourceItem, SyncStats
 from ctx.parser import PARSER_VERSION, parse_markdown, sha256_text
 from ctx.store import SQLiteStore
 
@@ -154,6 +154,29 @@ class ContextEngine:
             parser_version=PARSER_VERSION,
             embedding_model=self.store.get_metadata("embedding_model") or "none",
         )
+
+    def search_lexical(
+        self, query: str, *, limit: int = 10, auto_sync: bool = False
+    ) -> list[SearchHit]:
+        if not query.strip():
+            return []
+        if len(query) > self.config.limits.max_query_chars:
+            raise ValueError("query exceeds configured max_query_chars")
+        bounded = min(max(limit, 1), self.config.limits.max_results)
+        if auto_sync:
+            self.sync_workspace()
+        hits = self.store.lexical_search(query, bounded)
+        # Validate all documents before returning any possibly stale source text.
+        checked: set[str] = set()
+        for hit in hits:
+            path = hit.source.provenance.document_path
+            if path not in checked:
+                document = self._configured(path)
+                current = read_source(self.root, document, self.config.limits)
+                if sha256_text(current) != hit.source.provenance.document_sha256:
+                    raise StaleIndexError(path)
+                checked.add(path)
+        return hits
 
     def get_section(self, section_id: str, *, auto_sync: bool = False) -> SourceItem:
         item = self.store.get_section(section_id)
