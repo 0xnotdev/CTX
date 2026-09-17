@@ -12,6 +12,7 @@ license = { file = "LICENSE" }
 authors = [{ name = "ctx contributors" }]
 dependencies = [
   "markdown-it-py>=4.0,<5",
+  "mcp>=1.20,<2",
   "numpy>=2.2,<3",
   "pydantic>=2.11,<3",
   "rich>=14,<15",
@@ -20,7 +21,7 @@ dependencies = [
 
 [project.optional-dependencies]
 embeddings = ["fastembed>=0.7,<1"]
-mcp = ["mcp>=1.20,<2"]
+mcp = []
 dev = [
   "build>=1.2,<2",
   "mypy>=1.15,<2",

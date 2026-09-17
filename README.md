@@ -16,13 +16,23 @@ ingestion.
 ## Quick start
 
 ```console
-python -m venv .venv
+python3.12 -m venv .venv
 . .venv/bin/activate
-pip install -e '.[dev,mcp,embeddings]'
-ctx --help
+pip install -e '.[dev,embeddings]'
+ctx init
+ctx add spec.md --authority normative
+ctx add research.md --authority reference
+ctx add architecture.md --authority normative
+ctx index --download-model   # explicit first download; later runs are offline
+ctx pack "Implement CP-14" --token-budget 7000 --json
+ctx mcp                      # local stdio only
 ```
 
-The complete workflow and agent guidance are documented as later checkpoints land.
+If the optional embedding package/model is unavailable, indexing and retrieval continue with
+structure and FTS5 and print a warning; use `--no-embeddings` to make that choice explicit.
+`ctx sync` does zero parse/index work for unchanged documents. Other commands are `status`,
+`docs`, `outline`, `section`, `search`, `find`, `remove`, and `pack`; each retrieval operation
+uses the same application service as MCP. `AGENTS.md` is a tiny recommended agent template.
 
 ## Development
 

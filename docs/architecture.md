@@ -22,7 +22,7 @@ compatible patch/minor updates; the quality suite records the actually tested en
 | markdown-it-py | 4.x | CommonMark token maps/AST, never ad-hoc token slicing | MIT |
 | NumPy | 2.x | measured in-process cosine brute force | BSD-3-Clause |
 | FastEmbed | 0.x, optional | local ONNX embedding backend | Apache-2.0 |
-| MCP Python SDK | 1.x/2.x, optional | official FastMCP stdio adapter | MIT |
+| MCP Python SDK | 1.x | official FastMCP stdio adapter | MIT |
 | pytest | 8/9.x, dev | tests | MIT |
 | Ruff | 0.x, dev | format/lint | MIT |
 | mypy | 1.x, dev | strict type checking | MIT |
