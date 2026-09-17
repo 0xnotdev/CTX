@@ -149,6 +149,34 @@ class SourceItem(BaseModel):
     reason: str | None = None
 
 
+class ReferenceRecord(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    source_section_id: str
+    target_section_id: str | None
+    edge_type: EdgeType
+    label: str
+    resolved: bool
+
+
+class ReferenceResult(BaseModel):
+    """Traversable graph edge with exact source/target where available."""
+
+    model_config = ConfigDict(frozen=True)
+
+    edge: ReferenceRecord
+    source: SourceItem
+    target: SourceItem | None
+
+
+class SymbolResult(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    symbol: str
+    kind: str
+    source: SourceItem
+
+
 class SearchHit(BaseModel):
     """Ranked authoritative section returned by one or more retrieval channels."""
 

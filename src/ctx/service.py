@@ -12,7 +12,16 @@ from ctx.config import (
     read_source,
 )
 from ctx.embeddings import EmbeddingProvider
-from ctx.models import IndexStatus, SearchHit, SourceItem, SyncStats
+from ctx.graph import extract_graph
+from ctx.models import (
+    EdgeType,
+    IndexStatus,
+    ReferenceResult,
+    SearchHit,
+    SourceItem,
+    SymbolResult,
+    SyncStats,
+)
 from ctx.parser import PARSER_VERSION, parse_markdown, sha256_text
 from ctx.retrieval import classify_query, fuse_ranked
 from ctx.store import SQLiteStore
@@ -126,6 +135,17 @@ class ContextEngine:
                 self.store.remove_document(record.path)
                 totals["documents_removed"] += 1
 
+        graph_changed = any(
+            totals[field]
+            for field in (
+                "documents_added",
+                "documents_changed",
+                "documents_removed",
+            )
+        )
+        if graph_changed:
+            self.store.replace_graph(extract_graph(self.store.graph_sections()))
+
         if self.embedder is not None:
             pending = self.store.chunks_needing_embeddings(self.embedder.identity)
             if pending:
@@ -222,6 +242,31 @@ class ContextEngine:
             channels.append(("semantic", semantic))
         fused = fuse_ranked(query, classification, channels, bounded)
         return self._validate_hits(fused)
+
+    def get_references(self, section_id: str, *, incoming: bool = False) -> list[ReferenceResult]:
+        results = self.store.get_references(section_id, incoming=incoming)
+        hits = [SearchHit(source=result.source, score=0, channels=("graph",)) for result in results]
+        hits.extend(
+            SearchHit(source=result.target, score=0, channels=("graph",))
+            for result in results
+            if result.target is not None
+        )
+        self._validate_hits(hits)
+        return results
+
+    def get_dependencies(self, section_id: str) -> list[ReferenceResult]:
+        results = self.store.get_references(section_id, edge_types=(EdgeType.DEPENDS_ON,))
+        self.get_references(section_id)  # validates all source-bearing graph responses
+        return results
+
+    def find_symbol(self, symbol: str, *, limit: int = 20) -> list[SymbolResult]:
+        if len(symbol) > self.config.limits.max_query_chars:
+            raise ValueError("symbol exceeds configured max_query_chars")
+        results = self.store.find_symbol(symbol, min(limit, self.config.limits.max_results))
+        self._validate_hits(
+            [SearchHit(source=result.source, score=0, channels=("symbol",)) for result in results]
+        )
+        return results
 
     def get_section(self, section_id: str, *, auto_sync: bool = False) -> SourceItem:
         item = self.store.get_section(section_id)

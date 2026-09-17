@@ -15,13 +15,18 @@ import numpy as np
 from numpy.typing import NDArray
 
 from ctx.embeddings import cosine_scores
+from ctx.graph import ExtractedGraph, GraphSection
 from ctx.models import (
     Authority,
     DocumentRecord,
+    EdgeType,
     ParsedDocument,
     Provenance,
+    ReferenceRecord,
+    ReferenceResult,
     SearchHit,
     SourceItem,
+    SymbolResult,
     SyncStats,
 )
 
@@ -579,6 +584,95 @@ class SQLiteStore:
             )
         )
         return hits[:limit]
+
+    def graph_sections(self) -> list[GraphSection]:
+        rows = self.connection.execute(
+            "SELECT id, parent_id, heading, text FROM sections ORDER BY document_id, ordinal"
+        ).fetchall()
+        return [
+            GraphSection(
+                id=str(row["id"]),
+                parent_id=str(row["parent_id"]) if row["parent_id"] is not None else None,
+                heading=str(row["heading"]),
+                text=str(row["text"]),
+            )
+            for row in rows
+        ]
+
+    def replace_graph(self, graph: ExtractedGraph) -> None:
+        with self.connection:
+            self.connection.execute('DELETE FROM "references"')
+            self.connection.execute("DELETE FROM symbols")
+            self.connection.executemany(
+                'INSERT INTO "references"(source_section_id, target_section_id, edge_type, '
+                "label, resolved) VALUES(?, ?, ?, ?, ?)",
+                (
+                    (
+                        edge.source_section_id,
+                        edge.target_section_id,
+                        edge.edge_type.value,
+                        edge.label,
+                        int(edge.resolved),
+                    )
+                    for edge in graph.edges
+                ),
+            )
+            self.connection.executemany(
+                "INSERT INTO symbols(symbol, section_id, kind) VALUES(?, ?, ?)",
+                ((item.symbol, item.section_id, item.kind) for item in graph.symbols),
+            )
+
+    def get_references(
+        self,
+        section_id: str,
+        *,
+        edge_types: tuple[EdgeType, ...] | None = None,
+        incoming: bool = False,
+    ) -> list[ReferenceResult]:
+        column = "target_section_id" if incoming else "source_section_id"
+        parameters: list[object] = [section_id]
+        sql = f'SELECT * FROM "references" WHERE {column}=?'  # noqa: S608 - fixed column
+        if edge_types:
+            sql += " AND edge_type IN (" + ",".join("?" for _ in edge_types) + ")"
+            parameters.extend(edge.value for edge in edge_types)
+        sql += " ORDER BY edge_type, label, source_section_id, target_section_id"
+        rows = self.connection.execute(sql, parameters).fetchall()
+        results: list[ReferenceResult] = []
+        for row in rows:
+            edge = ReferenceRecord(
+                source_section_id=row["source_section_id"],
+                target_section_id=row["target_section_id"],
+                edge_type=EdgeType(row["edge_type"]),
+                label=row["label"],
+                resolved=bool(row["resolved"]),
+            )
+            results.append(
+                ReferenceResult(
+                    edge=edge,
+                    source=self.get_section(edge.source_section_id),
+                    target=(
+                        self.get_section(edge.target_section_id)
+                        if edge.target_section_id is not None
+                        else None
+                    ),
+                )
+            )
+        return results
+
+    def find_symbol(self, symbol: str, limit: int = 20) -> list[SymbolResult]:
+        rows = self.connection.execute(
+            "SELECT symbol, section_id, kind FROM symbols WHERE symbol=? COLLATE NOCASE "
+            "ORDER BY symbol, section_id LIMIT ?",
+            (symbol, limit),
+        ).fetchall()
+        return [
+            SymbolResult(
+                symbol=str(row["symbol"]),
+                kind=str(row["kind"]),
+                source=self.get_section(str(row["section_id"])),
+            )
+            for row in rows
+        ]
 
     def chunks_needing_embeddings(self, model: str) -> list[tuple[str, str, str]]:
         rows = self.connection.execute(

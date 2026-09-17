@@ -11,4 +11,5 @@ its clean commit; later rows record concrete hashes because a commit cannot cont
 | CP-03 | `6d70311` | `pytest tests/test_incremental.py`; full `pytest`; lint/format/type | 3 incremental and 15 total tests passed; zero-work sync, retained embedding, rename, delete, and stale guard verified |
 | CP-04 | `8a18739` | `pytest tests/test_lexical.py`; full `pytest`; lint/format/type | 7 lexical and 22 total tests passed; all specified exact identifiers rank owning section first |
 | CP-05 | `3093403` | `pytest tests/test_embeddings.py`; full `pytest`; `python benchmarks/cosine.py`; lint/format/type | 3 embedding and 25 total tests passed; 20k×384 cosine measured 9.31 ms/query; incremental vectors verified |
-| CP-06 | `CP-06 hybrid` | `pytest tests/test_hybrid.py`; full `pytest`; lint/format/type | 3 hybrid and 28 total tests passed; classifier and stable RRF verified; CP-14 structural result first |
+| CP-06 | `c469480` | `pytest tests/test_hybrid.py`; full `pytest`; lint/format/type | 3 hybrid and 28 total tests passed; classifier and stable RRF verified; CP-14 structural result first |
+| CP-07 | `CP-07 graph` | `pytest tests/test_graph.py`; full `pytest`; lint/format/type | 2 graph and 30 total tests passed; six edge kinds, symbols, traversal, unresolved labels, and no self-edges verified |
