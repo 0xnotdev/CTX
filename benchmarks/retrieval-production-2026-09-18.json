@@ -1,0 +1,42 @@
+{
+  "checkpoint_accuracy": 1.0,
+  "compression_ratio": 0.9879947686701468,
+  "corpus_characters": 89461,
+  "embedding_identity": "fastembed:BAAI/bge-small-en-v1.5@52398278842ec682c6f32300af41344b1c0b0bb2:3d57fa27448b19e85e3ad1abb0fa5d4938dc01487f26fe0c531b52e049ab90c2:384:0.8.0",
+  "hybrid": {
+    "mrr": 0.75,
+    "query_count": 4,
+    "recall_at_1": 0.5,
+    "recall_at_3": 1.0
+  },
+  "lexical": {
+    "mrr": 0.5833333333333334,
+    "query_count": 4,
+    "recall_at_1": 0.5,
+    "recall_at_3": 0.75
+  },
+  "pack_budget": 7000,
+  "pack_required_found": 6,
+  "pack_required_ids": 6,
+  "pack_selected_sections": 12,
+  "pack_serialized_tokens": 6064,
+  "packs": {
+    "context_pack_required_section_recall": 1.0,
+    "context_pack_serialized_tokens": 6064,
+    "context_pack_tokens_returned": 6064,
+    "exact_section_accuracy": 0.5,
+    "mrr": 0.75,
+    "query_count": 4,
+    "recall_at_1": 0.5,
+    "recall_at_3": 1.0,
+    "required_section_recall_per_thousand_tokens": 0.16490765171503957
+  },
+  "returned_source_characters": 1074,
+  "semantic": {
+    "mrr": 0.625,
+    "query_count": 4,
+    "recall_at_1": 0.5,
+    "recall_at_3": 0.75
+  },
+  "tier": "production-fastembed"
+}

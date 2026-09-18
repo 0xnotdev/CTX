@@ -1,0 +1,42 @@
+{
+  "checkpoint_accuracy": 1.0,
+  "compression_ratio": 0.9879947686701468,
+  "corpus_characters": 89461,
+  "embedding_identity": "ctx/hash-fixture:1:64",
+  "hybrid": {
+    "mrr": 0.5,
+    "query_count": 4,
+    "recall_at_1": 0.5,
+    "recall_at_3": 0.5
+  },
+  "lexical": {
+    "mrr": 0.5833333333333334,
+    "query_count": 4,
+    "recall_at_1": 0.5,
+    "recall_at_3": 0.75
+  },
+  "pack_budget": 7000,
+  "pack_required_found": 6,
+  "pack_required_ids": 6,
+  "pack_selected_sections": 12,
+  "pack_serialized_tokens": 6049,
+  "packs": {
+    "context_pack_required_section_recall": 1.0,
+    "context_pack_serialized_tokens": 6049,
+    "context_pack_tokens_returned": 6049,
+    "exact_section_accuracy": 0.5,
+    "mrr": 0.5,
+    "query_count": 4,
+    "recall_at_1": 0.5,
+    "recall_at_3": 0.5,
+    "required_section_recall_per_thousand_tokens": 0.16531658125309967
+  },
+  "returned_source_characters": 1074,
+  "semantic": {
+    "mrr": 0.25,
+    "query_count": 4,
+    "recall_at_1": 0.25,
+    "recall_at_3": 0.25
+  },
+  "tier": "deterministic-mechanics"
+}
