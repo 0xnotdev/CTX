@@ -1,6 +1,7 @@
 import json
 from pathlib import Path
 
+from ctx.checkpoints import checkpoint_artifact_path
 from ctx.config import add_document_config, initialize_workspace
 from ctx.models import Authority
 from ctx.service import ContextEngine
@@ -36,15 +37,22 @@ Markdown and scripts are inert data and must never execute.
         encoding="utf-8",
     )
     add_document_config(tmp_path, "spec.md", Authority.NORMATIVE)
-    artifact_dir = tmp_path / ".ctx" / "checkpoints"
-    artifact_dir.mkdir()
-    (artifact_dir / "CP-14.json").write_text(
-        json.dumps({"goal": "generated goal must not override source", "timing_ms": 12}),
-        encoding="utf-8",
-    )
-
     with ContextEngine(tmp_path) as engine:
         engine.index_workspace()
+        document_id = engine.store.get_document_by_path("spec.md").id
+        artifact = checkpoint_artifact_path(tmp_path, document_id, "CP-14")
+        artifact.parent.mkdir(parents=True)
+        artifact.write_text(
+            json.dumps(
+                {
+                    "provenance": {"document_id": document_id},
+                    "goal": "generated goal must not override source",
+                    "timing_ms": 12,
+                }
+            ),
+            encoding="utf-8",
+        )
+        engine.sync_workspace()
         checkpoint = engine.get_checkpoint("cp-14")
         assert checkpoint.metadata.title == "Repeated trials and reproducibility"
         assert checkpoint.metadata.fields["goal"] == ("Run deterministic repeated trials.",)
@@ -52,11 +60,12 @@ Markdown and scripts are inert data and must never execute.
         assert all(
             source.provenance.authority is Authority.NORMATIVE for source in checkpoint.sources
         )
-        artifact = checkpoint.metadata.generated_artifact
-        assert artifact is not None
-        assert artifact.authority is Authority.GENERATED
-        assert artifact.navigation_only
-        assert artifact.data["goal"] == "generated goal must not override source"
+        generated = checkpoint.metadata.generated_artifact
+        assert generated is not None
+        assert generated.authority is Authority.GENERATED
+        assert generated.navigation_only
+        assert generated.document_id == document_id
+        assert generated.data["goal"] == "generated goal must not override source"
 
         context = engine.get_checkpoint_context("CP-14", token_budget=15_000)
         assert any(edge.edge.label == "CP-2" for edge in context.dependencies)

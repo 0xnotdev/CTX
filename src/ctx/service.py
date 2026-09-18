@@ -215,11 +215,18 @@ class ContextEngine:
             source_text[document.path] = text
             source_hash[document.path] = sha256_text(text)
 
+        previous_records = self.store.list_documents()
         records, documents_added, documents_removed, documents_renamed = self._plan_documents(
             source_hash
         )
-        old_documents = {item.id: item for item in self.store.list_documents()}
-        artifacts = load_generated_artifacts(self.root, self.config.limits.max_file_bytes)
+        old_documents = {item.id: item for item in previous_records}
+        active_ids = {item.id for item in records}
+        artifacts = load_generated_artifacts(
+            self.root,
+            self.config.limits.max_file_bytes,
+            tuple(records),
+            deleted_document_ids=set(old_documents) - active_ids,
+        )
         artifact_fingerprint = hashlib.sha256(
             "".join(f"{key}:{value.sha256}" for key, value in sorted(artifacts.items())).encode()
         ).hexdigest()

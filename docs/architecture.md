@@ -105,8 +105,15 @@ Required durable objects are `documents`, `document_versions`, `sections`, `sear
 
 Document IDs are random opaque UUID-style values. Unique same-content rename detection can retain
 an ID; an ambiguous rename is never guessed. Delete/recreate and old-path reuse obtain new IDs.
-Checkpoints key `(document_id, checkpoint_id)`. References retain RESOLVED/UNRESOLVED/AMBIGUOUS,
-candidate IDs, reason, evidence and syntax origin.
+Checkpoints key `(document_id, checkpoint_id)`. Generated navigation artifacts use the same
+identity on disk as `.ctx/checkpoints/<percent-encoded-document-id>/CP-N.json`; the namespace is
+reversible and Windows-safe, survives a same-content rename because the opaque ID survives, and
+is cleaned/ignored independently when that document is deleted. Scoped artifact provenance that
+claims another document is rejected. Legacy unscoped `.ctx/checkpoints/CP-N.json` files migrate
+atomically only when embedded `document_id` (preferred) or `document_path` identifies exactly one
+active document; otherwise they remain explicitly ignored for rebuild/remediation and are never
+attached by global CP label. References retain RESOLVED/UNRESOLVED/AMBIGUOUS, candidate IDs,
+reason, evidence and syntax origin.
 
 Connections are checked thread-local connections, not one `check_same_thread=False` connection.
 Every connection enables foreign keys, WAL, 5000 ms busy timeout and `synchronous=NORMAL`.

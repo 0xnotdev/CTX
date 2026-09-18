@@ -4,16 +4,26 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
+import shutil
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 from pydantic import Field
 
 from ctx.graph import GraphSection
-from ctx.models import Authority, ContextPack, ReferenceResult, SourceItem, StrictModel
+from ctx.models import (
+    Authority,
+    ContextPack,
+    DocumentRecord,
+    ReferenceResult,
+    SourceItem,
+    StrictModel,
+)
 
-CHECKPOINT_VERSION = "ctx-checkpoints:2"
+CHECKPOINT_VERSION = "ctx-checkpoints:3"
 _CHECKPOINT = re.compile(r"^\s*(CP-\d+)\s*(?:[—–-]\s*)?(.*)$", re.IGNORECASE)
 _FIELD_LINE = re.compile(r"^\s*(?:[-*]\s*)?(?:\*\*)?([A-Za-z][A-Za-z /_-]+?)(?:\*\*)?\s*:\s*(.*)$")
 _LIST_LINE = re.compile(r"^\s*(?:[-*+]\s+|\d+[.)]\s+)(.*)$")
@@ -44,7 +54,9 @@ _FIELD_NAMES = {
 
 
 class GeneratedArtifact(StrictModel):
-    schema_version: int = 1
+    schema_version: int = 2
+    document_id: str
+    checkpoint_id: str
     path: str
     authority: Authority = Authority.GENERATED
     sha256: str
@@ -180,8 +192,6 @@ def recognize_checkpoints(
             for key, values in _section_fields(section).items():
                 fields.setdefault(key, []).extend(values)
         artifact = (artifacts or {}).get(f"{root.document_id}:{checkpoint_id}")
-        if artifact is None:
-            artifact = (artifacts or {}).get(checkpoint_id)
         records.append(
             CheckpointMetadata(
                 document_id=root.document_id,
@@ -196,34 +206,139 @@ def recognize_checkpoints(
     return tuple(records)
 
 
-def load_generated_artifacts(root: Path, max_bytes: int) -> dict[str, GeneratedArtifact]:
-    """Load bounded JSON checkpoint aids. They remain GENERATED and navigation-only."""
+def _artifact_namespace(document_id: str) -> str:
+    """Reversible, filesystem-safe persistent document identity (including on Windows)."""
+    return quote(document_id, safe="")
+
+
+def checkpoint_artifact_path(root: Path, document_id: str, checkpoint_id: str) -> Path:
+    normalized = checkpoint_id.strip().upper()
+    if not re.fullmatch(r"CP-\d+", normalized):
+        raise ValueError("checkpoint_id must have form CP-N")
+    return root / ".ctx" / "checkpoints" / _artifact_namespace(document_id) / f"{normalized}.json"
+
+
+def _read_artifact(
+    path: Path,
+    *,
+    root: Path,
+    directory: Path,
+    max_bytes: int,
+    document_id: str,
+    checkpoint_id: str,
+) -> GeneratedArtifact | None:
+    try:
+        resolved = path.resolve(strict=True)
+        resolved.relative_to(directory.resolve(strict=True))
+        if not resolved.is_file() or resolved.stat().st_size > min(max_bytes, 1_000_000):
+            return None
+        raw = resolved.read_bytes()
+        data = json.loads(raw)
+    except (FileNotFoundError, OSError, ValueError, json.JSONDecodeError, UnicodeDecodeError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    provenance = data.get("provenance")
+    if isinstance(provenance, dict):
+        claimed = provenance.get("document_id")
+        if claimed is not None and claimed != document_id:
+            return None
+    claimed = data.get("document_id")
+    if claimed is not None and claimed != document_id:
+        return None
+    return GeneratedArtifact(
+        document_id=document_id,
+        checkpoint_id=checkpoint_id,
+        path=resolved.relative_to(root).as_posix(),
+        sha256=hashlib.sha256(raw).hexdigest(),
+        data=data,
+    )
+
+
+def _legacy_document(data: dict[str, Any], documents: tuple[DocumentRecord, ...]) -> str | None:
+    provenance = data.get("provenance")
+    provenance = provenance if isinstance(provenance, dict) else {}
+    claimed_id = provenance.get("document_id", data.get("document_id"))
+    claimed_path = provenance.get("document_path", data.get("document_path"))
+    if isinstance(claimed_id, str):
+        matches = [record for record in documents if record.id == claimed_id]
+        return matches[0].id if len(matches) == 1 else None
+    if isinstance(claimed_path, str):
+        matches = [record for record in documents if record.path == claimed_path]
+        return matches[0].id if len(matches) == 1 else None
+    return None
+
+
+def _cleanup_deleted_namespaces(root: Path, document_ids: set[str]) -> None:
     directory = root / ".ctx" / "checkpoints"
+    for document_id in sorted(document_ids):
+        path = directory / _artifact_namespace(document_id)
+        try:
+            if path.is_symlink():
+                path.unlink()
+            elif path.is_dir():
+                shutil.rmtree(path)
+        except OSError:
+            # Cleanup is best effort; the namespace is absent from the active lookup either way.
+            continue
+
+
+def load_generated_artifacts(
+    root: Path,
+    max_bytes: int,
+    documents: tuple[DocumentRecord, ...],
+    *,
+    deleted_document_ids: set[str] | None = None,
+) -> dict[str, GeneratedArtifact]:
+    """Load/migrate document-scoped generated aids; never reinterpret an unscoped CP label."""
+    directory = root / ".ctx" / "checkpoints"
+    if deleted_document_ids:
+        _cleanup_deleted_namespaces(root, deleted_document_ids)
     if not directory.exists():
         return {}
-    artifacts: dict[str, GeneratedArtifact] = {}
-    for path in sorted(directory.glob("CP-*.json")):
+
+    # Legacy artifacts migrate only when embedded provenance selects exactly one active document.
+    for legacy in sorted(directory.glob("CP-*.json")):
+        match = re.fullmatch(r"(CP-\d+)\.json", legacy.name, re.IGNORECASE)
+        if match is None:
+            continue
         try:
-            resolved = path.resolve(strict=True)
-            resolved.relative_to(directory.resolve(strict=True))
-        except (FileNotFoundError, ValueError):
-            continue
-        if resolved.stat().st_size > min(max_bytes, 1_000_000):
-            continue
-        match = re.fullmatch(r"(CP-\d+)\.json", path.name, re.IGNORECASE)
-        if not match:
-            continue
-        raw = resolved.read_bytes()
-        try:
+            raw = legacy.read_bytes()
             data = json.loads(raw)
-        except (json.JSONDecodeError, UnicodeDecodeError):
+        except (OSError, json.JSONDecodeError, UnicodeDecodeError):
             continue
         if not isinstance(data, dict):
             continue
-        checkpoint_id = match.group(1).upper()
-        artifacts[checkpoint_id] = GeneratedArtifact(
-            path=resolved.relative_to(root).as_posix(),
-            sha256=hashlib.sha256(raw).hexdigest(),
-            data=data,
-        )
+        document_id = _legacy_document(data, documents)
+        if document_id is None:
+            continue
+        target = checkpoint_artifact_path(root, document_id, match.group(1))
+        if target.exists():
+            continue
+        target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        try:
+            os.replace(legacy, target)
+        except OSError:
+            continue
+
+    artifacts: dict[str, GeneratedArtifact] = {}
+    for record in sorted(documents, key=lambda item: item.id):
+        namespace = directory / _artifact_namespace(record.id)
+        if not namespace.is_dir() or namespace.is_symlink():
+            continue
+        for path in sorted(namespace.glob("CP-*.json")):
+            match = re.fullmatch(r"(CP-\d+)\.json", path.name, re.IGNORECASE)
+            if match is None:
+                continue
+            checkpoint_id = match.group(1).upper()
+            artifact = _read_artifact(
+                path,
+                root=root,
+                directory=directory,
+                max_bytes=max_bytes,
+                document_id=record.id,
+                checkpoint_id=checkpoint_id,
+            )
+            if artifact is not None:
+                artifacts[f"{record.id}:{checkpoint_id}"] = artifact
     return artifacts
