@@ -30,9 +30,9 @@ ctx add spec.md --authority normative --priority 10
 ctx add architecture.md --authority normative
 ctx add research.md --authority reference
 ctx index --no-embeddings
-ctx pack "Implement CP-14" --token-budget 7000 --json
+ctx pack "Implement CP-14" --token-budget 15000 --json
 # Explicit policy opt-in; output discloses requested and expanded effective budget:
-ctx pack "Implement CP-14" --token-budget 7000 --allow-required-budget-expansion --json
+ctx pack "Implement CP-14" --token-budget 15000 --allow-required-budget-expansion --json
 ```
 
 The default search response is a match-centered exact `SourceExcerpt`; request
@@ -78,7 +78,7 @@ ctx lines spec.md 120 180 --json
 ctx refs SECTION_ID --json
 ctx deps SECTION_ID --json
 ctx checkpoint show CP-14 --document spec.md --json
-ctx checkpoint context CP-14 --document spec.md --budget 7000 --json
+ctx checkpoint context CP-14 --document spec.md --budget 15000 --json
 ctx sync
 ```
 
@@ -128,7 +128,7 @@ Current Pi intentionally has **no built-in MCP client**. Do not invent an MCP se
 tested local integration is Pi's built-in `bash` tool calling the same shared CLI services:
 
 ```text
-Use `ctx pack "<task>" --token-budget 7000 --json`, inspect exact sources with
+Use `ctx pack "<task>" --token-budget 15000 --json`, require `COMPLETE`, inspect exact sources with
 `ctx section <id> --json` or `ctx lines ...`, then implement from the Markdown.
 ```
 

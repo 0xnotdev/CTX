@@ -3,7 +3,8 @@
 Use `ctx pack "<task or checkpoint>" --token-budget <budget> --json` (or MCP
 `get_context_pack`) before specification-driven work. For a checkpoint, prefer
 `ctx checkpoint context CP-N --budget ... --json`; retrieve important IDs again with
-`ctx section`/`ctx lines` when complete normative wording matters. Do not proceed through
+`ctx section`/`ctx lines` when complete normative wording matters. Require `COMPLETE` and inspect
+category coverage; do not proceed through `PARTIAL`, `AMBIGUOUS`, `CONFLICTING`,
 `AMBIGUOUS_CHECKPOINT`, `CONTEXT_BUDGET_TOO_SMALL`, or `PRIMARY_REQUIREMENT_TOO_LARGE`.
 
 Original Markdown is always authoritative. Embeddings, chunks, graph edges, metadata, context

@@ -228,7 +228,7 @@ def create_server(
     @server.tool()
     def get_context_pack(
         task: Query,
-        token_budget: TokenBudget = 7_000,
+        token_budget: TokenBudget = 15_000,
         documents: list[str] | None = None,
         authority_floor: str | None = None,
         authorities: list[str] | None = None,
@@ -277,7 +277,7 @@ def create_server(
     @server.tool()
     def get_checkpoint_context(
         checkpoint_id: Query,
-        token_budget: TokenBudget = 7_000,
+        token_budget: TokenBudget = 15_000,
         document: str | None = None,
         allow_required_budget_expansion: bool = False,
     ) -> Any:

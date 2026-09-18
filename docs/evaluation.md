@@ -7,6 +7,14 @@ ctx 1.0.0, FastEmbed 0.8.0, MCP 2.2.0, NumPy 2.5.3, ONNX Runtime 1.30.0,
 Pydantic 2.13.5. `platform.processor()` reported `x86_64`; no more specific CPU model is
 claimed.
 
+> **Pre-use compatibility note.** The production numbers below are retained V1 evidence and were
+> not recharacterized after semantic-window, span-diversity, completeness, artifact, and heading
+> changes. The current deterministic mechanics rerun uses a 15,000-token pack: all 6/6 required
+> sections were present, serialized use was 10,668 tokens, and exact returned source was 3,302 of
+> 89,461 characters (96.31% reduction). The former strict 7,000 budget now reports only 4/6 and
+> `PARTIAL` rather than silently claiming completeness. Current actual-BGE gates were not run
+> because FastEmbed and the verified local model were unavailable; see `PRE_USE_HARDENING_REPORT.md`.
+
 ## Tier separation
 
 - **Deterministic mechanics:** `HashEmbedding(64)` proves storage, dimensionality, filtering,
@@ -49,7 +57,7 @@ separate production regression proves the relevant long-tail chunk is semantic r
 low-overlap query `What must happen before accepting rerun evidence?`. The lexical-decoy case is
 why authority is only a staged tie-break rather than a global relevance boost.
 
-Checkpoint resolution accuracy was **1.000**. The 7,000-budget pack returned all **6/6** required
+In the retained V1 production run, checkpoint resolution accuracy was **1.000**. The 7,000-budget pack returned all **6/6** required
 normative sections (checkpoint, dependency, RunManifest, security, acceptance, verify), 12 exact
 selected sections, and a complete serialized estimate of **6,064** tokens. Exact returned source
 was 1,074 characters from an 89,461-character corpus: **98.80% source-character reduction**. The

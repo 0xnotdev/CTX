@@ -411,7 +411,7 @@ def deps(
 @app.command()
 def pack(
     task: Annotated[str, typer.Argument()],
-    token_budget: Annotated[int, typer.Option(min=1, max=2_000_000)] = 7_000,
+    token_budget: Annotated[int, typer.Option(min=1, max=2_000_000)] = 15_000,
     document: Annotated[list[str] | None, typer.Option("--document")] = None,
     authority_floor: Annotated[str | None, typer.Option()] = None,
     authority: Annotated[list[str] | None, typer.Option("--authority")] = None,
@@ -462,7 +462,7 @@ def checkpoint_show(
 def checkpoint_context(
     checkpoint_id: Annotated[str, typer.Argument()],
     document: Annotated[str | None, typer.Option("--document")] = None,
-    budget: Annotated[int, typer.Option("--budget", min=1, max=2_000_000)] = 7_000,
+    budget: Annotated[int, typer.Option("--budget", min=1, max=2_000_000)] = 15_000,
     root: Annotated[Path, typer.Option()] = Path("."),
     no_embeddings: Annotated[bool, typer.Option()] = False,
     model_dir: Annotated[Path | None, typer.Option()] = None,

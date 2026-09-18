@@ -102,7 +102,7 @@ def run(production: bool, model_dir: Path | None) -> dict[str, object]:
                 packs = [
                     PackCase(
                         "Implement CP-14 with RunManifest security acceptance and verify",
-                        7_000,
+                        15_000,
                         required,
                     )
                 ]

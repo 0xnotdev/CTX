@@ -872,7 +872,7 @@ class ContextEngine:
         checkpoint_id: str,
         *,
         document: str | None = None,
-        token_budget: int = 7_000,
+        token_budget: int = 15_000,
         allow_required_budget_expansion: bool = False,
     ) -> CheckpointContext:
         checkpoint = self.get_checkpoint(checkpoint_id, document=document)
