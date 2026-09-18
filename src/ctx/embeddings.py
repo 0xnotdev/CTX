@@ -36,6 +36,8 @@ class EmbeddingProvider(Protocol):
     @property
     def metadata(self) -> dict[str, str]: ...
 
+    def count_tokens(self, text: str) -> int: ...
+
     def embed_documents(self, texts: Sequence[str]) -> NDArray[np.float32]: ...
 
     def embed_query(self, query: str) -> NDArray[np.float32]: ...
@@ -103,6 +105,10 @@ class HashEmbedding:
         if norm:
             vector /= norm
         return vector
+
+    def count_tokens(self, text: str) -> int:
+        """Count the exact token units consumed by this mechanics-only fixture."""
+        return len(re.findall(r"[\w.@/:-]+", text.casefold(), flags=re.UNICODE))
 
     def embed_documents(self, texts: Sequence[str]) -> NDArray[np.float32]:
         if not texts:
@@ -362,6 +368,10 @@ class FastEmbedProvider:
             "artifact_sha256": self._manifest.artifact_sha256,
             "runtime_version": self._manifest.runtime_version,
         }
+
+    def count_tokens(self, text: str) -> int:
+        """Use the verified local runtime's tokenizer; no model/network call is involved."""
+        return int(self._model.token_count(text))
 
     def embed_documents(self, texts: Sequence[str]) -> NDArray[np.float32]:
         vectors = list(self._model.passage_embed(texts))

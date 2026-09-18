@@ -39,12 +39,16 @@ document ID, full heading path, and duplicate occurrence. Internal heading slugs
 navigation keys, **not claimed to implement exact GitHub/CommonMark anchor semantics**; duplicate
 anchor candidates remain ambiguous.
 
-One section emits multiple bounded `search_chunks`. Each row stores section/chunk ID, ordinal,
-exact source range/text/hash, separate heading-prefixed embedding text/hash, byte-safe estimate,
-and chunker version. Blocks combine below target size. Large paragraphs split deterministically at
-line/sentence/word boundaries. Ordinary fences/tables remain whole; oversized ones become exact
-bounded lexical/line pieces. Embedding input is at most 448 UTF-8 bytes, a strict upper bound below
-a 512-token byte-fallback sequence, so model truncation is not relied on.
+One section emits multiple overlapping semantic `search_chunks`. Each row stores section/window
+ID, ordinal, exact source range/text/hash, separate heading-prefixed embedding text/hash, model
+input estimate, and chunker version. Authoritative section boundaries never change. Windows target
+320 embedding-model tokens with 48 tokens (15%) overlap and a hard 448-token input ceiling, leaving
+64 tokens below the default BGE model's 512-token truncation limit. Verified FastEmbed uses its
+local tokenizer's exact `token_count`; structural/lexical-only operation uses the documented
+deterministic `ceil(UTF-8 bytes / 4) + 2` approximation. Line/sentence/word and fence boundaries
+are preferred where possible; oversized fences/tables become exact contiguous windows. Optional
+heading-path context exists only in embedding text. Hydrated evidence is always exact source text
+at the stored offsets and hashes; overlapping windows are disposable navigation, not authority.
 
 Structural, FTS and vector SQL receives document/authority/exclusion/heading/scope filters before
 its cutoff. RRF fuses relevance; authority and priority decide materially comparable candidates,

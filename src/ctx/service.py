@@ -259,7 +259,12 @@ class ContextEngine:
             ).fetchall()
         }
         parsed = {
-            record.id: parse_markdown(source_text[record.path], record.id) for record in records
+            record.id: parse_markdown(
+                source_text[record.path],
+                record.id,
+                embedding_token_counter=(self.embedder.count_tokens if self.embedder else None),
+            )
+            for record in records
         }
         graph_sections = [
             GraphSection(

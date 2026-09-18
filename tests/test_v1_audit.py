@@ -74,7 +74,7 @@ def test_multichunk_tail_search_and_match_centered_pack(tmp_path: Path) -> None:
     with ContextEngine(tmp_path, embedder=HashEmbedding(32)) as engine:
         engine.sync_workspace()
         section_id = engine.store.section_ids()[0]
-        assert engine.store.chunk_count(section_id) > 20
+        assert engine.store.chunk_count(section_id) > 3
         hit = engine.search("TAIL_NEEDLE cobalt", limit=1)[0]
         full = engine.get_section(section_id)
         assert hit.source.source_type == "excerpt"
@@ -293,10 +293,16 @@ def test_adversarial_huge_blocks_unicode_and_random_data_remain_exact(tmp_path: 
         sections = engine.store.document_sections("adversarial.md")
         assert "".join(item.text for item in sections) == source
         rows = engine.store.connection.execute(
-            "SELECT source_text,source_sha256,embedding_text FROM search_chunks ORDER BY ordinal"
+            "SELECT source_text,source_sha256,embedding_text,start_offset,end_offset,"
+            "token_estimate FROM search_chunks ORDER BY ordinal"
         ).fetchall()
-        assert "".join(str(row["source_text"]) for row in rows) == source
-        assert all(len(str(row["embedding_text"]).encode()) <= 448 for row in rows)
+        assert rows[0]["start_offset"] == 0
+        assert rows[-1]["end_offset"] == len(source)
+        assert all(
+            source[int(row["start_offset"]) : int(row["end_offset"])] == row["source_text"]
+            for row in rows
+        )
+        assert all(int(row["token_estimate"]) <= 448 for row in rows)
         assert all(row["source_sha256"] for row in rows)
 
 

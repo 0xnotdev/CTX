@@ -73,9 +73,18 @@ def test_long_paragraph_is_split_into_bounded_exact_chunks() -> None:
     source = f"# Long\n{paragraph}\n"
     parsed = parse_markdown(source)
     assert len(parsed.sections) == 1
-    assert len(parsed.chunks) > 100
-    assert "".join(chunk.source_text for chunk in parsed.chunks) == source
-    assert all(len(chunk.embedding_text.encode("utf-8")) <= 448 for chunk in parsed.chunks)
+    assert len(parsed.chunks) > 50
+    assert parsed.chunks[0].start_offset == 0
+    assert parsed.chunks[-1].end_offset == len(source)
+    assert all(
+        right.start_offset < left.end_offset
+        for left, right in zip(parsed.chunks, parsed.chunks[1:], strict=False)
+    )
+    assert all(chunk.token_estimate <= 448 for chunk in parsed.chunks)
+    assert all(
+        source[chunk.start_offset : chunk.end_offset] == chunk.source_text
+        for chunk in parsed.chunks
+    )
     assert all(chunk.source_sha256 for chunk in parsed.chunks)
 
 

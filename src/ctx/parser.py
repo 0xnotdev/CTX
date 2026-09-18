@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import bisect
 import hashlib
+import math
 import re
 import unicodedata
 from collections import defaultdict
+from collections.abc import Callable
 from pathlib import PurePosixPath
 
 from markdown_it import MarkdownIt
@@ -15,12 +17,15 @@ from markdown_it.token import Token
 from ctx.models import ParsedDocument, SearchChunk, Section
 
 PARSER_VERSION = "markdown-it-py:4/ctx-sections:2"
-CHUNKER_VERSION = "ctx-ast-byte-safe:2"
-EMBEDDING_TEXT_VERSION = "heading-path-prefix:1"
-# A byte is an upper bound on byte-fallback tokenizer tokens. Keeping embedding text below 480
-# therefore stays under the common 512-token BGE limit without relying on model truncation.
-CHUNK_TARGET_BYTES = 384
-CHUNK_MAX_BYTES = 448
+CHUNKER_VERSION = "ctx-semantic-windows:3"
+EMBEDDING_TEXT_VERSION = "heading-path-prefix:2"
+# The default BGE runtime truncates at 512 model tokens.  Leave 64 tokens of headroom and aim
+# for a useful 320-token passage with 15% overlap.  FastEmbed supplies exact model token counts;
+# the no-model path uses the deterministic approximation documented by
+# ``approximate_embedding_tokens`` below.
+EMBEDDING_WINDOW_TARGET_TOKENS = 320
+EMBEDDING_WINDOW_MAX_TOKENS = 448
+EMBEDDING_WINDOW_OVERLAP_TOKENS = 48
 
 
 def sha256_text(text: str) -> str:
@@ -63,105 +68,103 @@ def _section_id(document_key: str, path: tuple[str, ...], occurrence: int) -> st
     return f"sec:{readable}{suffix}:{digest}"
 
 
-def _byte_len(text: str) -> int:
-    return len(text.encode("utf-8"))
+def approximate_embedding_tokens(text: str) -> int:
+    """Deterministic no-model estimate used only to size derived search windows.
+
+    The estimate is ``ceil(UTF-8 bytes / 4) + 2`` (the conventional generic text ratio plus
+    special-token allowance).  It is not represented as an exact tokenizer bound.  When the
+    verified FastEmbed runtime is active, its own ``token_count`` replaces this function.
+    """
+    return math.ceil(len(text.encode("utf-8")) / 4) + 2 if text else 0
 
 
-def _bounded_split(text: str, maximum: int = CHUNK_TARGET_BYTES) -> list[tuple[int, int]]:
-    """Split text at line/sentence/word boundaries with a hard UTF-8 byte ceiling."""
+def _largest_fitting_end(
+    text: str,
+    start: int,
+    prefix: str,
+    maximum: int,
+    count_tokens: Callable[[str], int],
+) -> int:
+    """Find a deterministic maximal character boundary within the token budget."""
+    low, high = start + 1, len(text)
+    best = start
+    while low <= high:
+        middle = (low + high) // 2
+        candidate = f"{prefix}\n\n{text[start:middle]}" if prefix else text[start:middle]
+        if count_tokens(candidate) <= maximum:
+            best = middle
+            low = middle + 1
+        else:
+            high = middle - 1
+    return max(start + 1, best)
+
+
+def _preferred_end(text: str, start: int, hard_end: int) -> int:
+    """Prefer a nearby line/sentence/word boundary without making windows tiny."""
+    if hard_end >= len(text):
+        return len(text)
+    window = text[start:hard_end]
+    # Keep a fence opener out of the preceding prose window. Oversized fenced blocks may still
+    # be split into exact interior windows, as they cannot fit in one model input.
+    marker = re.compile(r"(?m)^[ \t]{0,3}(?:```|~~~)")
+    inside_fence = len(marker.findall(text[:start])) % 2 == 1
+    starts_at_fence = marker.match(text[start:]) is not None
+    fence = marker.search(window[1:]) if not inside_fence and not starts_at_fence else None
+    if fence is not None:
+        return start + 1 + fence.start()
+    floor = max(1, int(len(window) * 0.82))
+    matches = list(re.finditer(r"(?:\n|(?<=[.!?])\s+|\s+)", window, flags=re.UNICODE))
+    cuts = [match.end() for match in matches if match.end() >= floor]
+    return start + cuts[-1] if cuts else hard_end
+
+
+def _overlap_start(text: str, start: int, end: int, count_tokens: Callable[[str], int]) -> int:
+    """Choose at most the configured token overlap while guaranteeing forward progress."""
+    low, high = start + 1, end
+    best = end
+    while low <= high:
+        middle = (low + high) // 2
+        if count_tokens(text[middle:end]) <= EMBEDDING_WINDOW_OVERLAP_TOKENS:
+            best = middle
+            high = middle - 1
+        else:
+            low = middle + 1
+    # Align to the next source boundary.  This may reduce, never increase, overlap.
+    match = re.search(r"(?:^|\s+)", text[best:end], flags=re.UNICODE)
+    aligned = best + match.end() if match and best + match.end() < end else best
+    return min(end - 1, max(start + 1, aligned))
+
+
+def _window_spans(
+    text: str, prefix: str, count_tokens: Callable[[str], int]
+) -> list[tuple[int, int]]:
+    """Create exact, overlapping semantic-window ranges over one authoritative section."""
     if not text:
         return []
-    result: list[tuple[int, int]] = []
+    # A pathological heading must not force one-character windows.  It is still authoritative
+    # source and is indexed as source text; only its optional navigation prefix is omitted.
+    window_prefix = prefix if count_tokens(f"{prefix}\n\n") < EMBEDDING_WINDOW_TARGET_TOKENS else ""
+    windows: list[tuple[int, int]] = []
     start = 0
-    size = len(text)
-    preferred = re.compile(r"(?:\n|(?<=[.!?])\s+|\s+)", re.UNICODE)
-    while start < size:
-        byte_count = 0
-        hard_end = start
-        while hard_end < size:
-            encoded = text[hard_end].encode("utf-8")
-            if byte_count + len(encoded) > maximum:
-                break
-            byte_count += len(encoded)
-            hard_end += 1
-        if hard_end == size:
-            result.append((start, size))
-            break
-        if hard_end == start:  # impossible for positive maximum, defensive for odd encodings
-            hard_end += 1
-        window = text[start:hard_end]
-        cuts = [match.end() for match in preferred.finditer(window)]
-        end = start + cuts[-1] if cuts and cuts[-1] >= len(window) // 2 else hard_end
-        result.append((start, end))
-        start = end
-    return result
-
-
-def _block_spans(text: str, lines: list[str], markdown: MarkdownIt) -> list[tuple[int, int]]:
-    """Return contiguous block extents, preserving whitespace between AST blocks."""
-    line_offsets = [0]
-    for line in lines:
-        line_offsets.append(line_offsets[-1] + len(line))
-    mapped: list[tuple[int, int]] = []
-    for token in markdown.parse(text):
-        if token.level != 0 or token.map is None:
-            continue
-        start, end = token.map
-        if start < end <= len(lines):
-            mapped.append((line_offsets[start], line_offsets[end]))
-    mapped.sort()
-    nonoverlap: list[tuple[int, int]] = []
-    cursor = 0
-    for start, end in mapped:
-        if end <= cursor:
-            continue
-        start = max(start, cursor)
-        if start > cursor:
-            start = cursor  # attach blank/inter-block bytes to the following source block
-        nonoverlap.append((start, end))
-        cursor = end
-    if cursor < len(text):
-        nonoverlap.append((cursor, len(text)))
-    return nonoverlap or ([(0, len(text))] if text else [])
-
-
-def _chunk_spans(text: str, markdown: MarkdownIt) -> list[tuple[int, int]]:
-    lines = text.splitlines(keepends=True)
-    blocks = _block_spans(text, lines, markdown)
-    atoms: list[tuple[int, int]] = []
-    for start, end in blocks:
-        block = text[start:end]
-        if _byte_len(block) <= CHUNK_TARGET_BYTES:
-            atoms.append((start, end))
-        else:
-            atoms.extend((start + left, start + right) for left, right in _bounded_split(block))
-
-    chunks: list[tuple[int, int]] = []
-    current_start: int | None = None
-    current_end = 0
-    for start, end in atoms:
-        if current_start is None:
-            current_start, current_end = start, end
-            continue
-        proposed = text[current_start:end]
-        if start == current_end and _byte_len(proposed) <= CHUNK_TARGET_BYTES:
-            current_end = end
-        else:
-            chunks.append((current_start, current_end))
-            current_start, current_end = start, end
-    if current_start is not None:
-        chunks.append((current_start, current_end))
-
-    # Every emitted source chunk and its optional prefix is independently bounded.
-    result: list[tuple[int, int]] = []
-    for start, end in chunks:
-        if _byte_len(text[start:end]) <= CHUNK_MAX_BYTES:
-            result.append((start, end))
-        else:
-            result.extend(
-                (start + left, start + right) for left, right in _bounded_split(text[start:end])
+    while start < len(text):
+        hard_end = _largest_fitting_end(
+            text, start, window_prefix, EMBEDDING_WINDOW_TARGET_TOKENS, count_tokens
+        )
+        end = _preferred_end(text, start, hard_end)
+        candidate = f"{window_prefix}\n\n{text[start:end]}" if window_prefix else text[start:end]
+        if count_tokens(candidate) > EMBEDDING_WINDOW_MAX_TOKENS:
+            end = _largest_fitting_end(
+                text, start, window_prefix, EMBEDDING_WINDOW_MAX_TOKENS, count_tokens
             )
-    return result
+        windows.append((start, end))
+        if end >= len(text):
+            break
+        if text[end:].startswith(("```", "~~~")):
+            start = end  # a structural fence boundary is more valuable than overlap here
+        else:
+            next_start = _overlap_start(text, start, end, count_tokens)
+            start = end if next_start <= start else next_start
+    return windows
 
 
 def _line_position(
@@ -182,11 +185,12 @@ def _search_chunks(
     section: Section,
     document_text: str,
     line_starts: list[int],
-    markdown: MarkdownIt,
+    count_tokens: Callable[[str], int],
 ) -> list[SearchChunk]:
     prefix = " > ".join(section.heading_path)
     chunks: list[SearchChunk] = []
-    for ordinal, (relative_start, relative_end) in enumerate(_chunk_spans(section.text, markdown)):
+    spans = _window_spans(section.text, prefix, count_tokens)
+    for ordinal, (relative_start, relative_end) in enumerate(spans):
         source_text = section.text[relative_start:relative_end]
         absolute_start = section.start_offset + relative_start
         absolute_end = section.start_offset + relative_end
@@ -194,10 +198,12 @@ def _search_chunks(
             line_starts, absolute_start, absolute_end
         )
         candidate = f"{prefix}\n\n{source_text}" if prefix else source_text
-        embedding_text = candidate if _byte_len(candidate) <= CHUNK_MAX_BYTES else source_text
-        # A pathological heading can itself exceed the model limit; source remains exact and
-        # embedding text is still hard-bounded without inventing/truncating authoritative text.
-        if _byte_len(embedding_text) > CHUNK_MAX_BYTES:
+        # Pathological headings can consume the complete input allowance.  They remain present
+        # in authoritative source, while navigation text falls back to the exact source window.
+        embedding_text = (
+            candidate if count_tokens(candidate) <= EMBEDDING_WINDOW_MAX_TOKENS else source_text
+        )
+        if count_tokens(embedding_text) > EMBEDDING_WINDOW_MAX_TOKENS:
             embedding_text = ""
         source_hash = sha256_text(source_text)
         chunks.append(
@@ -216,13 +222,18 @@ def _search_chunks(
                 embedding_text=embedding_text,
                 embedding_sha256=sha256_text(embedding_text),
                 chunker_version=CHUNKER_VERSION,
-                token_estimate=_byte_len(embedding_text),
+                token_estimate=count_tokens(embedding_text),
             )
         )
     return chunks
 
 
-def parse_markdown(source_text: str, document_key: str = "document.md") -> ParsedDocument:
+def parse_markdown(
+    source_text: str,
+    document_key: str = "document.md",
+    *,
+    embedding_token_counter: Callable[[str], int] | None = None,
+) -> ParsedDocument:
     """Parse exact structural sections and bounded search chunks.
 
     Section boundaries come only from Markdown AST heading maps. Chunks never alter section text:
@@ -294,10 +305,11 @@ def parse_markdown(source_text: str, document_key: str = "document.md") -> Parse
         if level > 0:
             stack.append(section)
 
+    count_tokens = embedding_token_counter or approximate_embedding_tokens
     chunks = [
         chunk
         for section in sections
-        for chunk in _search_chunks(section, source_text, line_starts, markdown)
+        for chunk in _search_chunks(section, source_text, line_starts, count_tokens)
     ]
     return ParsedDocument(
         document_key=key,
