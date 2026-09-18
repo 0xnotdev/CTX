@@ -1,80 +1,136 @@
-# Architecture and dependency record
+# V1 architecture and offline contract
 
-## Invariants and boundaries
+## Invariant
 
-`ctx` is layered local infrastructure: CLI/MCP adapters call shared application services,
-which call a Markdown parser, retrieval engine, and SQLite repository. Source files are opened
-read-only and remain authoritative. Every derived object is disposable navigation data.
-V0 deliberately excludes web UI, auth/accounts/teams, SaaS or sync services, hosted APIs,
-agent execution, general document chat, non-Markdown formats, and external databases.
+Original Markdown is authoritative. A `SourceSection` is one complete heading-delimited AST
+unit; a `SourceExcerpt` is an exact contiguous subset. Both carry document/section/range hashes,
+line/column/offset provenance, authority, and one `index_generation`. Search chunks, embedding
+text, vectors, graph/checkpoint records, rankings, omissions, conflicts, and generated artifacts
+are disposable navigation data and cannot replace source text.
 
-## Dependency decisions (researched 2025-09-17)
+## Components
 
-Versions were checked against each project's PyPI release metadata (the authoritative package
-metadata consumed by installers) and linked upstream documentation. Bounds deliberately allow
-compatible patch/minor updates; the quality suite records the actually tested environment.
+```text
+ Codex / Claude Code / generic MCP       CLI / Pi bash workflow
+                 | stdio                           |
+                 v                                 v
+        MCP SDK 2 MCPServer  ───────────> create_context_engine(...)
+                                             |
+                                      ContextEngine services
+                   ┌─────────────────────────┼────────────────────────┐
+                   v                         v                        v
+          Markdown AST/chunker       retrieval/context plan    graph/checkpoints
+                   \                         |                       /
+                    \                        v                      /
+                     └──────── SQLite V2 + FTS5 + local vectors ───┘
+                                      WAL / atomic generation
+                                             |
+                                      exact Markdown files
+```
 
-| Package | Selected line | Purpose / decision | License |
-|---|---:|---|---|
-| Pydantic | 2.x | typed boundary and domain models | MIT |
-| Typer | 0.x | typed CLI | MIT |
-| Rich | 14.x | readable terminal output | MIT |
-| markdown-it-py | 4.x | CommonMark token maps/AST, never ad-hoc token slicing | MIT |
-| NumPy | 2.x | measured in-process cosine brute force | BSD-3-Clause |
-| FastEmbed | 0.x, optional | local ONNX embedding backend | Apache-2.0 |
-| MCP Python SDK | 1.x | official FastMCP stdio adapter | MIT |
-| pytest | 8/9.x, dev | tests | MIT |
-| Ruff | 0.x, dev | format/lint | MIT |
-| mypy | 1.x, dev | strict type checking | MIT |
+CLI and MCP contain input/output adaptation only. Both use `create_context_engine`; hybrid is
+active only when a configured model manifest and every artifact checksum verify. Otherwise the
+factory reports structural+lexical fallback. No adapter has a private retrieval path.
 
-Metadata/docs: [Pydantic](https://pypi.org/project/pydantic/),
-[Typer](https://pypi.org/project/typer/), [Rich](https://pypi.org/project/rich/),
-[markdown-it-py](https://pypi.org/project/markdown-it-py/),
-[NumPy](https://pypi.org/project/numpy/), [FastEmbed](https://pypi.org/project/fastembed/),
-[MCP](https://pypi.org/project/mcp/), and [pytest](https://pypi.org/project/pytest/).
-No LangChain, LlamaIndex, vector server, cloud API, or paid dependency is used.
+## Parse and retrieval
 
-## Local embedding decision
+`markdown-it-py` source maps define sections. Stable section identity derives from opaque
+document ID, full heading path, and duplicate occurrence. Internal heading slugs are deterministic
+navigation keys, **not claimed to implement exact GitHub/CommonMark anchor semantics**; duplicate
+anchor candidates remain ambiguous.
 
-The production default is `BAAI/bge-small-en-v1.5` (384 dimensions) through FastEmbed's local
-ONNX CPU runtime. Model download is explicit; cached operation sets `local_files_only`, and no
-external embedding API or API key exists. Model identity and dimensions are persisted beside
-each vector. The model is MIT licensed, independently of FastEmbed's Apache-2.0 package license.
-Selection evidence, sources, measured quality figures, and our NumPy brute-force measurement
-are in [`benchmarks/embedding_selection.md`](../benchmarks/embedding_selection.md). A
-stable hash fixture keeps ordinary tests network-free.
+One section emits multiple bounded `search_chunks`. Each row stores section/chunk ID, ordinal,
+exact source range/text/hash, separate heading-prefixed embedding text/hash, byte-safe estimate,
+and chunker version. Blocks combine below target size. Large paragraphs split deterministically at
+line/sentence/word boundaries. Ordinary fences/tables remain whole; oversized ones become exact
+bounded lexical/line pieces. Embedding input is at most 448 UTF-8 bytes, a strict upper bound below
+a 512-token byte-fallback sequence, so model truncation is not relied on.
 
-## Hybrid retrieval
+Structural, FTS and vector SQL receives document/authority/exclusion/heading/scope filters before
+its cutoff. RRF fuses relevance; authority and priority decide materially comparable candidates,
+then modest document/hash diversity is applied. Search defaults to the matched chunk excerpt and
+retains match location. Complete sections require explicit opt-in.
 
-Queries are deterministically classified for checkpoint/section IDs, identifier shapes, paths,
-and quoted phrases. Structural, FTS5/BM25, and local cosine rankings are combined with
-reciprocal-rank fusion using `k=60`, then exact-heading/direct-identifier, authority, and
-priority boosts plus stable provenance tie-breaking. RRF is based on Cormack, Clarke, and
-Büttcher, *Reciprocal Rank Fusion outperforms Condorcet and individual Rank Learning Methods*,
-SIGIR 2009 (<https://doi.org/10.1145/1571941.1572114>). `k=60` is the paper's commonly reported
-setting; it is recorded and evaluation-tested rather than claimed universally optimal.
-Generated candidates sort behind original sources.
+Context planning orders exact checkpoint/requirement, explicit refs, dependencies, checkpoint
+fields, interfaces/models, global normative constraints, task-specific error/security evidence,
+and semantic fallback. Generic auxiliary searches are conditional. Ambiguous graph records have
+no target and cannot be treated as certainty. Every selected item reports category, reason,
+relevance, confidence and authority. A requested checkpoint root is first and cannot be displaced;
+insufficient room produces `PRIMARY_REQUIREMENT_TOO_LARGE`.
 
-Context packs prioritize direct requirements, references, dependencies, interfaces/models,
-global/error/security constraints, acceptance/verification material, then small structural
-neighbors. The default token count is explicitly an estimate (`ceil(UTF-8 bytes / 4)`), and
-AST block maps permit only valid whole-block reductions. Fences and tables are never sliced.
-Checkpoint recognition is deterministic and extensible: recognized headings and canonical
-fields are stored as navigation metadata while exact root/child sections remain the response
-source. Optional `.ctx/checkpoints/CP-N.json` artifacts are bounded, hashed, labeled GENERATED,
-and kept in a separate `generated_artifact` field; source fields always win and artifacts are
-never interpreted as normative text.
+## Serialized token budgets
 
-`POSSIBLE_CONFLICT` is intentionally conservative: it requires an overlapping exact technical
-identifier and one of a small deterministic contradictory phrase pairs (`must`/`must not`,
-enabled/disabled, allowed/prohibited, required/forbidden). It labels both exact sources and
-authorities and is **not** general natural-language contradiction detection or reconciliation.
+A counter implements `identity`, `count_text`, and `count_serialized`. Supported semantics are:
 
-The MCP adapter uses the official Python SDK's FastMCP 1.x API over local stdio. Version 2
-renamed FastMCP and is intentionally excluded until a deliberate adapter migration; this is why
-the dependency is bounded `<2`. Every tool delegates to `ContextEngine`, applies typed input and
-configured response bounds, and returns Markdown/HTML/links/scripts only as inert JSON string
-data. There is no execution path in the server.
+- `STRICT_BYTE_UPPER_BOUND`: one token per UTF-8 byte, no safety margin;
+- `APPROXIMATE_GENERIC` (default): UTF-8 bytes/3 with an explicit 15% serialized margin;
+- `MODEL_SPECIFIC`: injectable exact tokenizer implementations.
 
-Dependency package licensing does **not** imply a model license; users must review model
-metadata before explicit download or redistribution.
+The budget includes task, JSON keys/escaping, provenance, omissions, compact conflict refs,
+structured MCP result and JSON-RPC envelope. A fixed-point count includes the count fields
+themselves. Results expose method/identity, safety margin, content, metadata and serialized token
+counts. If even the empty envelope cannot fit, `ContextBudgetTooSmall` gives requested, minimum,
+task estimate and metadata overhead. `PossibleConflict` contains compact `SourceRef`s, never
+another source copy.
+
+## SQLite V2 and generations
+
+Required durable objects are `documents`, `document_versions`, `sections`, `search_chunks`,
+`embeddings`, `references`, `symbols`, `checkpoints`, `index_generations`, `index_metadata`, and
+`search_chunks_fts`. Compatibility read views retain old V0 table names where harmless.
+
+Document IDs are random opaque UUID-style values. Unique same-content rename detection can retain
+an ID; an ambiguous rename is never guessed. Delete/recreate and old-path reuse obtain new IDs.
+Checkpoints key `(document_id, checkpoint_id)`. References retain RESOLVED/UNRESOLVED/AMBIGUOUS,
+candidate IDs, reason, evidence and syntax origin.
+
+Connections are checked thread-local connections, not one `check_same_thread=False` connection.
+Every connection enables foreign keys, WAL, 5000 ms busy timeout and `synchronous=NORMAL`.
+Writes take a process-local path lock and `BEGIN IMMEDIATE`. NORMAL+WAL protects committed state
+from process crashes but does not claim power-loss durability equivalent to FULL.
+
+Sync reads and parses all immutable source inputs, extracts graph/checkpoints, reuses valid vectors,
+and computes missing vectors before the write. One transaction replaces structure, FTS, vectors,
+graph, checkpoint and behavior metadata and increments generation exactly once. Multi-query reads
+hold the same logical operation lock; source-bearing responses assert one generation. Readers see
+old or new complete state, not a mixture.
+
+Generation behavior fingerprints include document path/authority/priority/hash; schema, parser,
+chunker, embedding-text, graph, checkpoint and retrieval versions; generated-artifact fingerprint;
+and full embedding identity/dimensions. Status distinguishes CLEAN, SOURCE_STALE,
+METADATA_STALE, PARSER_STALE, EMBEDDINGS_STALE, GRAPH_STALE, SCHEMA_STALE and MISSING_SOURCE.
+
+### V1 migration
+
+Opening schema V1 transactionally preserves configured path, authority and priority, assigns new
+opaque IDs, drops disposable derived rows, creates V2 and records `V1_TO_V2_MIGRATION`. The next
+sync rebuilds exact derived state. This intentional identity reset is required because a V1 ID was
+a path hash and could not safely represent old-path reuse.
+
+## Local model lifecycle and caches
+
+The platformdirs cache defaults to `~/.cache/ctx/models` on Linux and has environment/config/CLI
+overrides. Only `ctx model download` can pass `local_files_only=False`. `model install` copies
+already-local files. Verification checks every artifact against a manifest before ONNX startup.
+Normal index/sync/search/pack/MCP/checkpoint/doctor operations neither download nor update-check
+nor emit telemetry.
+
+Embedding identity includes provider, model, exact configured revision, aggregate artifact hash,
+dimensions and runtime version; algorithm metadata separately binds chunker and embedding-text
+versions. A mismatch invalidates vectors. The semantic matrix cache is immutable, bounded to four
+generation+identity+filter entries. Query vectors use a 128-entry identity+query+generation LRU.
+Generation changes make old entries unreachable; source response text is not cached.
+
+## Security boundary and dependencies
+
+Markdown/HTML/links/fences are inert strings. Source containment rejects absolute, drive-rooted,
+lexical and resolved escapes. Linux uses `O_NOFOLLOW`; all platforms compare descriptor identity
+and recheck actual read size. No portable userspace design is perfectly race-proof against an
+untrusted writer controlling the whole directory tree; such a workspace is outside the boundary.
+See [`../SECURITY.md`](../SECURITY.md).
+
+Dependency research dated 2026-09-18 is in [`dependency-research.md`](dependency-research.md).
+The official stable MCP SDK is 2.2.x (`MCPServer`); ctx exposes only its stdio transport. Pydantic,
+Typer/Rich, markdown-it-py, SQLite, NumPy, platformdirs and optional FastEmbed/ONNX are the only
+major runtime layers. There is no LangChain/LlamaIndex, remote API, hosted vector service or
+external database. Package licenses do not grant model redistribution rights.

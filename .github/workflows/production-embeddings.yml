@@ -1,0 +1,45 @@
+name: production-embedding-evaluation
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 4 * * 0"
+
+permissions:
+  contents: read
+
+jobs:
+  bge-offline:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.12.6"
+          enable-cache: true
+      - uses: actions/cache@v4
+        with:
+          path: .model-cache
+          key: ctx-bge-small-en-v1.5-52398278842ec682c6f32300af41344b1c0b0bb2
+      - name: Locked environment with local embedding runtime
+        run: uv sync --frozen --extra embeddings
+      - name: Explicit model download and verification
+        run: |
+          if ! uv run ctx model verify --model-dir .model-cache; then
+            uv run ctx model download --model-dir .model-cache
+          fi
+          uv run ctx model verify --model-dir .model-cache
+      - name: Socket-denied production semantic and stdio MCP tests
+        env:
+          CTX_RUN_PRODUCTION_EMBEDDINGS: "1"
+          CTX_MODEL_DIR: ${{ github.workspace }}/.model-cache
+        run: uv run pytest -q tests/test_production_embeddings.py
+      - name: Channel-separated retrieval report
+        run: >-
+          uv run python benchmarks/run_retrieval_evaluation.py --production
+          --model-dir .model-cache
+      - name: Production performance report
+        run: >-
+          uv run python benchmarks/run_benchmarks.py --production
+          --model-dir .model-cache

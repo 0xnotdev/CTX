@@ -1,0 +1,49 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        python: ["3.12", "3.13"]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.12.6"
+          enable-cache: true
+      - name: Locked environment
+        run: uv sync --frozen --python ${{ matrix.python }}
+      - name: Ruff format
+        run: uv run ruff format --check .
+      - name: Ruff lint
+        run: uv run ruff check .
+      - name: Strict mypy
+        run: uv run mypy src
+      - name: Tests including migration and stdio MCP
+        run: uv run pytest -q
+      - name: Build wheel and sdist
+        run: uv build
+      - name: Clean wheel install and CLI smoke
+        run: |
+          uv venv --python ${{ matrix.python }} .clean-wheel
+          CLEAN_PY=.clean-wheel/bin/python
+          if [ ! -x "$CLEAN_PY" ]; then CLEAN_PY=.clean-wheel/Scripts/python.exe; fi
+          WHEEL=$(uv run python -c "import glob; print(glob.glob('dist/*.whl')[0])")
+          uv pip install --python "$CLEAN_PY" "$WHEEL"
+          "$CLEAN_PY" -m ctx.cli --version
+          "$CLEAN_PY" -m ctx.cli --help
