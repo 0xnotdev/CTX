@@ -1,5 +1,6 @@
 import asyncio
 import os
+import stat
 import sys
 from pathlib import Path
 
@@ -42,6 +43,19 @@ def test_query_result_line_and_read_only_source_bounds(tmp_path: Path) -> None:
                 engine.search("line")
     finally:
         source.chmod(0o644)
+
+
+def test_config_write_without_posix_fchmod(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Windows has no os.fchmod; mkstemp must remain a valid secure write path."""
+    monkeypatch.delattr(os, "fchmod", raising=False)
+
+    initialize_workspace(tmp_path)
+
+    assert load_config(tmp_path).documents == ()
+    config = tmp_path / ".ctx" / "config.toml"
+    if os.name == "posix":
+        assert stat.S_IMODE(config.stat().st_mode) == 0o600
+    assert not list((tmp_path / ".ctx").glob(".config.*.tmp"))
 
 
 def test_hostile_and_malformed_markdown_remains_inert_data(tmp_path: Path) -> None:

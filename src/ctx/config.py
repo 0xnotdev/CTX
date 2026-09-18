@@ -205,7 +205,10 @@ def save_config(root: Path, config: WorkspaceConfig) -> None:
     )
     temporary = Path(temporary_name)
     try:
-        os.fchmod(descriptor, 0o600)
+        # mkstemp creates the file with mode 0o600. Reassert that mode through the
+        # open descriptor on platforms that expose POSIX descriptor permissions.
+        if hasattr(os, "fchmod"):
+            os.fchmod(descriptor, 0o600)
         with os.fdopen(descriptor, "wb", closefd=True) as handle:
             handle.write(content)
             handle.flush()
