@@ -8,7 +8,8 @@ from collections.abc import Sequence
 from ctx.models import SearchHit, StrictModel
 
 RRF_K = 60
-RETRIEVAL_VERSION = "ctx-rrf-staged-authority:2"
+MAX_SPANS_PER_SECTION = 3
+RETRIEVAL_VERSION = "ctx-rrf-span-diversity:3"
 
 
 class QueryClassification(StrictModel):
@@ -90,6 +91,94 @@ def _is_direct(term: str, hit: SearchHit) -> bool:
     return term.casefold().lstrip("#") in heading.casefold()
 
 
+def _overlaps(left: SearchHit, right: SearchHit) -> bool:
+    left_p = left.source.provenance
+    right_p = right.source.provenance
+    return (
+        left_p.section_id == right_p.section_id
+        and left_p.start_offset < right_p.end_offset
+        and right_p.start_offset < left_p.end_offset
+    )
+
+
+def _near_duplicate(left: SearchHit, right: SearchHit) -> bool:
+    left_p = left.source.provenance
+    right_p = right.source.provenance
+    if left_p.range_sha256 == right_p.range_sha256:
+        return True
+    if _overlaps(left, right):
+        return True
+    # Repeated boilerplate can be independently relevant at distant offsets in one huge section.
+    if left_p.section_id == right_p.section_id:
+        return False
+    left_words = set(re.findall(r"[\w.@/:-]+", left.source.text.casefold(), flags=re.UNICODE))
+    right_words = set(re.findall(r"[\w.@/:-]+", right.source.text.casefold(), flags=re.UNICODE))
+    if not left_words or not right_words:
+        return False
+    return len(left_words & right_words) / len(left_words | right_words) >= 0.92
+
+
+def diversify_spans(
+    hits: Sequence[SearchHit],
+    limit: int,
+    *,
+    max_spans_per_section: int = MAX_SPANS_PER_SECTION,
+) -> list[SearchHit]:
+    """Select deterministic, exact ranges without globally collapsing a large section.
+
+    The first pass reserves room for distinct sections and documents.  The second admits up to
+    three non-overlapping, independently ranked ranges from a section.  Any overlapping window,
+    identical range hash, or >=92% token-set duplicate collapses to its higher-ranked peer.
+    """
+    if limit < 1:
+        return []
+    selected: list[SearchHit] = []
+    deferred: list[SearchHit] = []
+    per_section: dict[str, int] = {}
+    per_document: dict[str, int] = {}
+
+    def duplicate(hit: SearchHit) -> bool:
+        return any(_near_duplicate(hit, existing) for existing in selected)
+
+    def accept(hit: SearchHit) -> bool:
+        section_id = hit.source.provenance.section_id
+        if per_section.get(section_id, 0) >= max_spans_per_section or duplicate(hit):
+            return False
+        selected.append(hit)
+        per_section[section_id] = per_section.get(section_id, 0) + 1
+        document_id = hit.source.provenance.document_id
+        per_document[document_id] = per_document.get(document_id, 0) + 1
+        return True
+
+    # Distinct sections first; an early document cap stops one document from consuming the
+    # complete small top-k before another relevant document is considered.
+    for hit in hits:
+        provenance = hit.source.provenance
+        if per_section.get(provenance.section_id, 0) or (
+            per_document.get(provenance.document_id, 0) >= 2 and len(selected) < min(limit, 6)
+        ):
+            deferred.append(hit)
+            continue
+        accept(hit)
+        if len(selected) >= limit:
+            return selected
+
+    for hit in deferred:
+        if accept(hit) and len(selected) >= limit:
+            break
+    return selected
+
+
+def _fusion_key(
+    hit: SearchHit, representatives: dict[tuple[str, int, int], SearchHit]
+) -> tuple[str, int, int]:
+    provenance = hit.source.provenance
+    for key, previous in representatives.items():
+        if _overlaps(hit, previous):
+            return key
+    return (provenance.section_id, provenance.start_offset, provenance.end_offset)
+
+
 def fuse_ranked(
     query: str,
     classification: QueryClassification,
@@ -97,27 +186,27 @@ def fuse_ranked(
     limit: int,
 ) -> list[SearchHit]:
     """Fuse relevance first, then let authority break materially comparable results."""
-    representatives: dict[str, SearchHit] = {}
-    scores: dict[str, float] = {}
-    names: dict[str, list[str]] = {}
-    terms: dict[str, set[str]] = {}
+    representatives: dict[tuple[str, int, int], SearchHit] = {}
+    scores: dict[tuple[str, int, int], float] = {}
+    names: dict[tuple[str, int, int], list[str]] = {}
+    terms: dict[tuple[str, int, int], set[str]] = {}
     for channel_index, (channel_name, hits) in enumerate(channels):
         for rank, hit in enumerate(hits, start=1):
-            section_id = hit.source.provenance.section_id
-            previous = representatives.get(section_id)
+            key = _fusion_key(hit, representatives)
+            previous = representatives.get(key)
             # Structural/lexical excerpts retain exact match location ahead of semantic fallbacks.
             if previous is None or (channel_index < 2 and previous.channels == ("semantic",)):
-                representatives[section_id] = hit
-            scores[section_id] = scores.get(section_id, 0.0) + 1.0 / (RRF_K + rank)
-            names.setdefault(section_id, []).append(channel_name)
-            terms.setdefault(section_id, set()).update(hit.matched_terms)
+                representatives[key] = hit
+            scores[key] = scores.get(key, 0.0) + 1.0 / (RRF_K + rank)
+            names.setdefault(key, []).append(channel_name)
+            terms.setdefault(key, set()).update(hit.matched_terms)
 
     query_folded = query.strip().casefold()
     staged: list[tuple[float, SearchHit]] = []
-    for section_id, representative in representatives.items():
+    for key, representative in representatives.items():
         source = representative.source
         heading = source.provenance.heading_path[-1] if source.provenance.heading_path else ""
-        score = scores[section_id]
+        score = scores[key]
         if heading.strip().casefold() == query_folded:
             score += 4.0
         direct_terms = [
@@ -133,8 +222,8 @@ def fuse_ranked(
                 SearchHit(
                     source=source,
                     score=score,
-                    channels=tuple(dict.fromkeys(names[section_id])),
-                    matched_terms=tuple(sorted(terms.get(section_id, set()) | set(direct_terms))),
+                    channels=tuple(dict.fromkeys(names[key])),
+                    matched_terms=tuple(sorted(terms.get(key, set()) | set(direct_terms))),
                     chunk_id=representative.chunk_id,
                     match_start_line=representative.match_start_line,
                     match_end_line=representative.match_end_line,
@@ -157,25 +246,4 @@ def fuse_ranked(
         )
     )
 
-    # Modest early diversity: suppress adjacent/duplicate sections after exact relevance while
-    # permitting at least two per document and filling from deferred candidates.
-    selected: list[SearchHit] = []
-    deferred: list[SearchHit] = []
-    per_document: dict[str, int] = {}
-    seen_hashes: set[str] = set()
-    for _, hit in staged:
-        path = hit.source.provenance.document_path
-        duplicate = hit.source.provenance.range_sha256 in seen_hashes
-        if (per_document.get(path, 0) >= 2 and len(selected) < min(limit, 6)) or duplicate:
-            deferred.append(hit)
-            continue
-        selected.append(hit)
-        per_document[path] = per_document.get(path, 0) + 1
-        seen_hashes.add(hit.source.provenance.range_sha256)
-        if len(selected) >= limit:
-            return selected
-    for hit in deferred:
-        if len(selected) >= limit:
-            break
-        selected.append(hit)
-    return selected
+    return diversify_spans([hit for _, hit in staged], limit)

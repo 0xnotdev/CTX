@@ -51,9 +51,13 @@ heading-path context exists only in embedding text. Hydrated evidence is always 
 at the stored offsets and hashes; overlapping windows are disposable navigation, not authority.
 
 Structural, FTS and vector SQL receives document/authority/exclusion/heading/scope filters before
-its cutoff. RRF fuses relevance; authority and priority decide materially comparable candidates,
-then modest document/hash diversity is applied. Search defaults to the matched chunk excerpt and
-retains match location. Complete sections require explicit opt-in.
+its cutoff. RRF fuses overlapping ranges rather than globally collapsing by section. Deterministic
+selection first reserves room for distinct sections/documents, then admits at most three disjoint
+ranges from one section; overlapping adjacent windows, identical hashes, and >=92% cross-section
+token-set duplicates collapse. This bound was chosen to retain two or three distant requirements
+in a huge section without allowing one section to consume a small top-k. Authority and priority
+decide materially comparable candidates. Search defaults to matched exact excerpts and retains
+each range location/hash. Complete sections require explicit opt-in.
 
 Context planning orders exact checkpoint/requirement, explicit refs, dependencies, checkpoint
 fields, interfaces/models, global normative constraints, task-specific error/security evidence,

@@ -58,8 +58,8 @@ def test_pack_truncation_uses_ast_safe_ranges_and_reports_omissions(tmp_path: Pa
     add_document_config(tmp_path, "large.md", Authority.NORMATIVE)
     with ContextEngine(tmp_path) as engine:
         engine.index_workspace()
-        pack = engine.get_context_pack("CP-14 Table", 800)
-        assert pack.estimated_tokens <= 800
+        pack = engine.get_context_pack("CP-14 Table", 1_000)
+        assert pack.estimated_tokens <= 1_000
         assert pack.items
         direct = pack.items[0]
         assert direct.source.text.startswith("# CP-14")

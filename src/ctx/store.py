@@ -40,6 +40,7 @@ from ctx.models import (
     SymbolResult,
     SyncStats,
 )
+from ctx.retrieval import diversify_spans
 
 SCHEMA_VERSION = 2
 SQLITE_BUSY_TIMEOUT_MS = 5_000
@@ -844,7 +845,7 @@ class SQLiteStore:
     ) -> list[SearchHit]:
         generation = self.index_generation()
         filter_sql, filter_values = self._filter_sql(filters)
-        best: dict[str, tuple[sqlite3.Row, int, str]] = {}
+        best: dict[tuple[str, str], tuple[sqlite3.Row, int, str]] = {}
         for term in terms:
             escaped = self._like_prefix(term)
             rows = self.connection.execute(
@@ -859,9 +860,11 @@ class SQLiteStore:
             for row in rows:
                 section_id = str(row["id"])
                 rank = int(row["structural_rank"])
-                previous = best.get(section_id)
+                # Heading matches identify a section once; source matches identify exact spans.
+                key = (section_id, "heading" if rank < 2 else str(row["chunk_id"]))
+                previous = best.get(key)
                 if previous is None or rank < previous[1]:
-                    best[section_id] = (row, rank, term)
+                    best[key] = (row, rank, term)
         ordered = sorted(
             best.values(),
             key=lambda item: (
@@ -873,7 +876,7 @@ class SQLiteStore:
             ),
         )
         hits: list[SearchHit] = []
-        for row, rank, term in ordered[:limit]:
+        for row, rank, term in ordered:
             source: SourceItem = (
                 self._source_item(row, generation)
                 if include_full_section
@@ -891,7 +894,7 @@ class SQLiteStore:
                     index_generation=generation,
                 )
             )
-        return hits
+        return diversify_spans(hits, limit)
 
     @staticmethod
     def _like_prefix(term: str) -> str:
@@ -973,17 +976,7 @@ class SQLiteStore:
                 hit.chunk_id or "",
             )
         )
-        # Dedupe sections only after filtered chunk ranking, retaining match location.
-        selected: list[SearchHit] = []
-        seen: set[str] = set()
-        for hit in hits:
-            if hit.source.provenance.section_id in seen:
-                continue
-            seen.add(hit.source.provenance.section_id)
-            selected.append(hit)
-            if len(selected) >= limit:
-                break
-        return selected
+        return diversify_spans(hits, limit)
 
     def semantic_search(
         self,
@@ -1004,13 +997,8 @@ class SQLiteStore:
             key=lambda index: (-float(scores[index]), str(rows[index]["chunk_id"])),
         )
         result: list[SearchHit] = []
-        seen: set[str] = set()
         for index in ranked:
             row = rows[index]
-            section_id = str(row["id"])
-            if section_id in seen:
-                continue
-            seen.add(section_id)
             source = (
                 self._source_item(row, generation)
                 if include_full_section
@@ -1027,9 +1015,7 @@ class SQLiteStore:
                     index_generation=generation,
                 )
             )
-            if len(result) >= limit:
-                break
-        return result
+        return diversify_spans(result, limit)
 
     def graph_sections(self) -> list[GraphSection]:
         rows = self.connection.execute(

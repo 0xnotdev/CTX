@@ -370,8 +370,20 @@ def build_context_pack(
             metadata_overhead=base_metadata,
         )
 
-    candidates: dict[str, _Candidate] = {}
+    candidates: dict[tuple[str, int, int], _Candidate] = {}
     sequence = 0
+
+    def candidate_key(source: SourceItem) -> tuple[str, int, int]:
+        provenance = source.provenance
+        for key, existing in candidates.items():
+            other = existing.source.provenance
+            if (
+                provenance.section_id == other.section_id
+                and provenance.start_offset < other.end_offset
+                and other.start_offset < provenance.end_offset
+            ):
+                return key
+        return (provenance.section_id, provenance.start_offset, provenance.end_offset)
 
     def add(
         source: SourceItem,
@@ -398,7 +410,7 @@ def build_context_pack(
             return
         if filters.authorities and p.authority not in filters.authorities:
             return
-        key = p.section_id
+        key = candidate_key(source)
         candidate = _Candidate(
             source,
             _CATEGORIES[category],
@@ -566,8 +578,18 @@ def build_context_pack(
         ),
     )
     selected: list[ContextPackItem] = []
-    selected_ids: set[str] = set()
-    all_ids = [item.source.provenance.section_id for item in ordered]
+    selected_keys: set[tuple[str, int, int]] = set()
+    all_keys = [
+        (
+            item.source.provenance.section_id,
+            item.source.provenance.start_offset,
+            item.source.provenance.end_offset,
+        )
+        for item in ordered
+    ]
+
+    def omission_label(key: tuple[str, int, int]) -> str:
+        return f"{key[0]}@{key[1]}:{key[2]}"
 
     def item(candidate: _Candidate, source: SourceItem) -> ContextPackItem:
         return ContextPackItem(
@@ -594,8 +616,13 @@ def build_context_pack(
         accepted = False
         for option in options:
             tentative = [*selected, item(candidate, option)]
-            tentative_ids = selected_ids | {candidate.source.provenance.section_id}
-            omitted = [identifier for identifier in all_ids if identifier not in tentative_ids]
+            key = (
+                candidate.source.provenance.section_id,
+                candidate.source.provenance.start_offset,
+                candidate.source.provenance.end_offset,
+            )
+            tentative_keys = selected_keys | {key}
+            omitted = [omission_label(value) for value in all_keys if value not in tentative_keys]
             conflicts = _possible_conflicts(tentative)
             pack = _pack(
                 task=task,
@@ -613,7 +640,7 @@ def build_context_pack(
             )
             if pack.serialized_estimated_tokens <= token_budget:
                 selected = tentative
-                selected_ids = tentative_ids
+                selected_keys = tentative_keys
                 accepted = True
                 break
         if candidate.primary and not accepted:
@@ -624,7 +651,7 @@ def build_context_pack(
                 metadata_overhead=pack.metadata_tokens,
             )
 
-    omitted = [identifier for identifier in all_ids if identifier not in selected_ids]
+    omitted = [omission_label(value) for value in all_keys if value not in selected_keys]
     conflicts = _possible_conflicts(selected)
     result = _pack(
         task=task,
@@ -638,7 +665,8 @@ def build_context_pack(
             **retrieval_metadata,
             "candidate_count": len(ordered),
             "selected_count": len(selected),
-            "primary_retained": not primary_section_ids or primary_section_ids <= selected_ids,
+            "primary_retained": not primary_section_ids
+            or primary_section_ids <= {item.source.provenance.section_id for item in selected},
         },
     )
     if result.serialized_estimated_tokens > token_budget:
