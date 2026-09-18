@@ -5,11 +5,12 @@ from __future__ import annotations
 import re
 from collections.abc import Sequence
 
+from ctx.heading import canonical_heading
 from ctx.models import SearchHit, StrictModel
 
 RRF_K = 60
 MAX_SPANS_PER_SECTION = 3
-RETRIEVAL_VERSION = "ctx-rrf-span-diversity:3"
+RETRIEVAL_VERSION = "ctx-rrf-span-diversity:4"
 
 
 class QueryClassification(StrictModel):
@@ -88,7 +89,7 @@ def classify_query(query: str) -> QueryClassification:
 
 def _is_direct(term: str, hit: SearchHit) -> bool:
     heading = hit.source.provenance.heading_path[-1] if hit.source.provenance.heading_path else ""
-    return term.casefold().lstrip("#") in heading.casefold()
+    return canonical_heading(term.lstrip("#")) in canonical_heading(heading)
 
 
 def _overlaps(left: SearchHit, right: SearchHit) -> bool:
@@ -207,7 +208,7 @@ def fuse_ranked(
         source = representative.source
         heading = source.provenance.heading_path[-1] if source.provenance.heading_path else ""
         score = scores[key]
-        if heading.strip().casefold() == query_folded:
+        if canonical_heading(heading) == canonical_heading(query_folded):
             score += 4.0
         direct_terms = [
             term for term in classification.structural_terms if _is_direct(term, representative)

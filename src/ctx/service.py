@@ -25,6 +25,7 @@ from ctx.checkpoints import (
 from ctx.config import ConfigError, DocumentConfig, database_path, load_config, read_source
 from ctx.embeddings import EmbeddingProvider, FastEmbedProvider
 from ctx.graph import GRAPH_VERSION, GraphSection, extract_graph
+from ctx.heading import HEADING_NORMALIZATION_VERSION
 from ctx.models import (
     Authority,
     ContextPack,
@@ -128,6 +129,7 @@ class ContextEngine:
             "parser_version": PARSER_VERSION,
             "chunker_version": CHUNKER_VERSION,
             "embedding_text_version": EMBEDDING_TEXT_VERSION,
+            "heading_normalization_version": HEADING_NORMALIZATION_VERSION,
             "graph_version": GRAPH_VERSION,
             "checkpoint_version": CHECKPOINT_VERSION,
             "retrieval_version": RETRIEVAL_VERSION,
@@ -483,6 +485,11 @@ class ContextEngine:
         algorithm_checks = (
             ("parser_version", PARSER_VERSION, StatusCategory.PARSER_STALE),
             ("chunker_version", CHUNKER_VERSION, StatusCategory.PARSER_STALE),
+            (
+                "heading_normalization_version",
+                HEADING_NORMALIZATION_VERSION,
+                StatusCategory.PARSER_STALE,
+            ),
             ("graph_version", GRAPH_VERSION, StatusCategory.GRAPH_STALE),
             ("checkpoint_version", CHECKPOINT_VERSION, StatusCategory.GRAPH_STALE),
             ("retrieval_version", RETRIEVAL_VERSION, StatusCategory.SCHEMA_STALE),

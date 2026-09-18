@@ -35,9 +35,16 @@ factory reports structural+lexical fallback. No adapter has a private retrieval 
 ## Parse and retrieval
 
 `markdown-it-py` source maps define sections. Stable section identity derives from opaque
-document ID, full heading path, and duplicate occurrence. Internal heading slugs are deterministic
-navigation keys, **not claimed to implement exact GitHub/CommonMark anchor semantics**; duplicate
-anchor candidates remain ambiguous.
+document ID, the canonical full heading path, and canonical duplicate occurrence. One shared CTX
+internal function is used by parser IDs, graph/local-anchor resolution, FTS heading indexing,
+structural search, heading-prefix filters, checkpoint heading recognition, and retrieval boosts:
+NFKC then Unicode case-fold; retain Unicode alphanumeric characters and combining marks; map each
+run of spaces, periods, underscores, hyphens, punctuation, parentheses, slashes, symbols/emoji, or
+controls to one ASCII hyphen; trim hyphens; use `section` if empty. Thus canonically equivalent
+headings are disambiguated deterministically as occurrences 1, 2, ... while exact source headings
+remain untouched. This is **not claimed to implement GitHub/CommonMark or renderer anchor
+semantics**. Only local `#anchor` links use the CTX scheme; external `path#anchor` links remain
+explicitly unresolved, and duplicate canonical candidates remain ambiguous.
 
 One section emits multiple overlapping semantic `search_chunks`. Each row stores section/window
 ID, ordinal, exact source range/text/hash, separate heading-prefixed embedding text/hash, model

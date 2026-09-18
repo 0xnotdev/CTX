@@ -20,6 +20,7 @@ from numpy.typing import NDArray
 from ctx.checkpoints import CheckpointMetadata
 from ctx.embeddings import cosine_scores
 from ctx.graph import ExtractedGraph, GraphSection
+from ctx.heading import canonical_heading, canonical_heading_path_json
 from ctx.models import (
     Authority,
     DocumentRecord,
@@ -218,6 +219,10 @@ class SQLiteStore:
         else:
             connection = sqlite3.connect(self.path, timeout=SQLITE_BUSY_TIMEOUT_MS / 1_000)
         connection.row_factory = sqlite3.Row
+        connection.create_function("ctx_heading_key", 1, canonical_heading, deterministic=True)
+        connection.create_function(
+            "ctx_heading_path_key", 1, canonical_heading_path_json, deterministic=True
+        )
         connection.execute("PRAGMA foreign_keys = ON")
         connection.execute(f"PRAGMA busy_timeout = {SQLITE_BUSY_TIMEOUT_MS}")
         if not self.read_only:
@@ -552,7 +557,7 @@ class SQLiteStore:
                 for item in parsed.sections
             ),
         )
-        headings = {item.id: item.heading for item in parsed.sections}
+        headings = {item.id: canonical_heading(item.heading) for item in parsed.sections}
         connection.executemany(
             "INSERT INTO search_chunks(id,section_id,ordinal,start_line,end_line,start_column,"
             "end_column,start_offset,end_offset,source_text,source_sha256,embedding_text,"
@@ -819,9 +824,13 @@ class SQLiteStore:
             escaped = filters.scope.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
             values.append(escaped.rstrip("/") + "/%")
         if filters.heading_prefix:
-            clauses.append("s.heading_path LIKE ?")
-            prefix = json.dumps(filters.heading_prefix, ensure_ascii=False)[:-1]
-            values.append(prefix + "%")
+            clauses.append(
+                "(ctx_heading_path_key(s.heading_path)=? OR "
+                "ctx_heading_path_key(s.heading_path) LIKE ? ESCAPE '\\')"
+            )
+            prefix = "/".join(canonical_heading(part) for part in filters.heading_prefix)
+            escaped = prefix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            values.extend((prefix, escaped + "/%"))
         return (" AND " + " AND ".join(clauses) if clauses else ""), values
 
     def get_section(self, section_id: str) -> SourceSection:
@@ -847,15 +856,26 @@ class SQLiteStore:
         filter_sql, filter_values = self._filter_sql(filters)
         best: dict[tuple[str, str], tuple[sqlite3.Row, int, str]] = {}
         for term in terms:
-            escaped = self._like_prefix(term)
+            canonical_term = canonical_heading(term)
+            escaped = self._like_prefix(canonical_term)
             rows = self.connection.execute(
-                f"SELECT {self._source_select()},CASE WHEN s.heading=? COLLATE NOCASE THEN 0 "
-                "WHEN s.heading LIKE ? ESCAPE '\\' THEN 1 ELSE 2 END AS structural_rank "
-                "FROM search_chunks c JOIN sections s ON s.id=c.section_id "
-                "JOIN documents d ON d.id=s.document_id WHERE (s.heading=? COLLATE NOCASE "
-                "OR s.heading LIKE ? ESCAPE '\\' OR instr(c.source_text,?)>0 OR d.path=?)"
+                f"SELECT {self._source_select()},CASE WHEN ctx_heading_key(s.heading)=? THEN 0 "
+                "WHEN ctx_heading_key(s.heading) LIKE ? ESCAPE '\\' THEN 1 ELSE 2 END "
+                "AS structural_rank FROM search_chunks c JOIN sections s ON s.id=c.section_id "
+                "JOIN documents d ON d.id=s.document_id WHERE (ctx_heading_key(s.heading)=? "
+                "OR ctx_heading_key(s.heading) LIKE ? ESCAPE '\\' OR instr(c.source_text,?)>0 "
+                "OR d.path=?)"
                 f"{filter_sql} ORDER BY structural_rank,d.path,s.ordinal,c.ordinal LIMIT ?",
-                (term, escaped, term, escaped, term, term, *filter_values, min(limit * 20, 1000)),
+                (
+                    canonical_term,
+                    escaped,
+                    canonical_term,
+                    escaped,
+                    term,
+                    term,
+                    *filter_values,
+                    min(limit * 20, 1000),
+                ),
             ).fetchall()
             for row in rows:
                 section_id = str(row["id"])
@@ -936,7 +956,9 @@ class SQLiteStore:
         identifier = re.compile(rf"(?<![\w]){re.escape(query.strip())}(?![\w])")
         hits: list[SearchHit] = []
         for row in by_chunk.values():
-            exact_heading = str(row["heading"]).strip().casefold() == query_folded
+            exact_heading = canonical_heading(str(row["heading"])) == canonical_heading(
+                query_folded
+            )
             exact_identifier = bool(query.strip()) and bool(
                 identifier.search(str(row["source_text"]))
             )

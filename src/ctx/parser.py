@@ -6,7 +6,6 @@ import bisect
 import hashlib
 import math
 import re
-import unicodedata
 from collections import defaultdict
 from collections.abc import Callable
 from pathlib import PurePosixPath
@@ -14,9 +13,10 @@ from pathlib import PurePosixPath
 from markdown_it import MarkdownIt
 from markdown_it.token import Token
 
+from ctx.heading import canonical_heading
 from ctx.models import ParsedDocument, SearchChunk, Section
 
-PARSER_VERSION = "markdown-it-py:4/ctx-sections:2"
+PARSER_VERSION = "markdown-it-py:4/ctx-sections:3"
 CHUNKER_VERSION = "ctx-semantic-windows:3"
 EMBEDDING_TEXT_VERSION = "heading-path-prefix:2"
 # The default BGE runtime truncates at 512 model tokens.  Leave 64 tokens of headroom and aim
@@ -30,13 +30,6 @@ EMBEDDING_WINDOW_OVERLAP_TOKENS = 48
 
 def sha256_text(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
-
-
-def _slug(value: str) -> str:
-    """Internal stable slug, not a claim of GitHub/CommonMark anchor compatibility."""
-    normalized = unicodedata.normalize("NFKC", value).casefold()
-    slug = re.sub(r"[^\w.-]+", "-", normalized, flags=re.UNICODE).strip("-._")
-    return slug or "section"
 
 
 def _front_matter(lines: list[str]) -> str | None:
@@ -61,8 +54,10 @@ def _heading_tokens(tokens: list[Token]) -> list[tuple[int, int, str]]:
 
 
 def _section_id(document_key: str, path: tuple[str, ...], occurrence: int) -> str:
-    readable = "/".join(_slug(part) for part in path)
-    identity = f"{document_key}\0{'/'.join(path)}\0{occurrence}"
+    canonical_path = tuple(canonical_heading(part) for part in path)
+    readable = "/".join(canonical_path)
+    canonical_identity = "\0".join(canonical_path)
+    identity = f"{document_key}\0{canonical_identity}\0{occurrence}"
     digest = hashlib.sha256(identity.encode()).hexdigest()[:16]
     suffix = f"-{occurrence}" if occurrence > 1 else ""
     return f"sec:{readable}{suffix}:{digest}"
@@ -284,8 +279,9 @@ def parse_markdown(
                 stack.pop()
             parent_id = stack[-1].id if stack else None
             path = (*stack[-1].heading_path, heading) if stack else (heading,)
-        path_counts[path] += 1
-        identifier = _section_id(key, path, path_counts[path])
+        canonical_path = tuple(canonical_heading(part) for part in path)
+        path_counts[canonical_path] += 1
+        identifier = _section_id(key, path, path_counts[canonical_path])
         section = Section(
             id=identifier,
             document_key=key,

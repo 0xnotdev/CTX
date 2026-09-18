@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
+from ctx.heading import canonical_heading
 from ctx.models import (
     Authority,
     EdgeType,
@@ -13,7 +14,7 @@ from ctx.models import (
     ResolutionStatus,
 )
 
-GRAPH_VERSION = "ctx-graph:3"
+GRAPH_VERSION = "ctx-graph:4"
 
 
 @dataclass(frozen=True)
@@ -55,12 +56,8 @@ _VERSIONED = re.compile(r"\b[A-Za-z_][\w.-]*@\d+\b")
 _CLI_FLAG = re.compile(r"(?<!\w)--[a-z0-9][a-z0-9-]*\b")
 _FILE_SYMBOL = re.compile(r"\b[\w./-]+\.py:[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)?\b")
 _DEPENDENCY = re.compile(r"(?im)^\s*(?:[-*]\s*)?(?:\*\*)?Dependencies?(?:\*\*)?\s*:\s*(.*)$")
-_LINK = re.compile(r"\[[^]]+\]\(#([^)]+)\)")
+_LINK = re.compile(r"\[[^]]+\]\(([^)#]*)#([^)]+)\)")
 _DECLARATION = re.compile(r"(?i)\b(?:interface|model|type|class|error|exception)\s+([\w.:-]+)")
-
-
-def _slug(value: str) -> str:
-    return re.sub(r"[^\w-]+", "-", value.casefold()).strip("-")
 
 
 def _symbol_kind(symbol: str) -> str:
@@ -147,9 +144,11 @@ def extract_graph(sections: list[GraphSection]) -> ExtractedGraph:
     symbols: dict[tuple[str, str, str, ReferenceOrigin], ExtractedSymbol] = {}
 
     for section in sections:
-        by_slug.setdefault(_slug(section.heading), []).append(section)
-        for match in _CP.finditer(section.heading):
-            by_cp.setdefault(match.group(0).upper(), []).append(section)
+        heading_key = canonical_heading(section.heading)
+        by_slug.setdefault(heading_key, []).append(section)
+        checkpoint_heading = re.match(r"^cp-(\d+)(?:-|$)", heading_key)
+        if checkpoint_heading is not None:
+            by_cp.setdefault(f"CP-{checkpoint_heading.group(1)}", []).append(section)
         for match in _SECTION.finditer(section.heading):
             by_mark.setdefault(re.sub(r"\s+", "", match.group(0)).casefold(), []).append(section)
         declared = {match.group(1).casefold() for match in _DECLARATION.finditer(section.text)}
@@ -176,6 +175,7 @@ def extract_graph(sections: list[GraphSection]) -> ExtractedGraph:
         origin: ReferenceOrigin,
         *,
         direct_target: str | None = None,
+        unresolved_reason: str | None = None,
     ) -> None:
         target: str | None
         candidate_ids: tuple[str, ...]
@@ -190,6 +190,8 @@ def extract_graph(sections: list[GraphSection]) -> ExtractedGraph:
             )
         else:
             target, candidate_ids, status, reason = _choose(source, candidates or [])
+            if status is ResolutionStatus.UNRESOLVED and unresolved_reason is not None:
+                reason = unresolved_reason
         edges[(source.id, edge_type, label, origin)] = ReferenceRecord(
             source_section_id=source.id,
             target_section_id=target,
@@ -225,8 +227,8 @@ def extract_graph(sections: list[GraphSection]) -> ExtractedGraph:
                 direct_target=parent.id,
             )
 
-        own_cp = _CP.search(section.heading)
-        own_cp_value = own_cp.group(0).upper() if own_cp else None
+        own_cp = re.match(r"^cp-(\d+)(?:-|$)", canonical_heading(section.heading))
+        own_cp_value = f"CP-{own_cp.group(1)}" if own_cp else None
         for match in _CP.finditer(section.text):
             label = match.group(0).upper()
             if label != own_cp_value:
@@ -252,14 +254,20 @@ def extract_graph(sections: list[GraphSection]) -> ExtractedGraph:
                     _origin(section.text, match.start()),
                 )
         for match in _LINK.finditer(section.text):
-            anchor = match.group(1)
+            destination, anchor = match.groups()
+            external = bool(destination)
             add(
                 section,
-                by_slug.get(anchor.casefold()),
+                [] if external else by_slug.get(canonical_heading(anchor)),
                 EdgeType.RELATED_SECTION,
-                f"#{anchor}",
+                f"{destination}#{anchor}",
                 match.group(0),
                 ReferenceOrigin.LINK,
+                unresolved_reason=(
+                    "external anchor syntax is not guaranteed by the CTX internal scheme"
+                    if external
+                    else None
+                ),
             )
 
         dependency_values: list[str] = []
@@ -275,7 +283,7 @@ def extract_graph(sections: list[GraphSection]) -> ExtractedGraph:
                         break
                 value = "\n".join(lines)
             dependency_values.append(value)
-        if _slug(section.heading) in {"dependency", "dependencies"}:
+        if canonical_heading(section.heading) in {"dependency", "dependencies"}:
             dependency_values.append("\n".join(section.text.splitlines()[1:]))
         for dependency in dependency_values:
             labels = [*_CP.findall(dependency), *_SECTION.findall(dependency)]

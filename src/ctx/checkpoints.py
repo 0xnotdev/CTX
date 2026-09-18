@@ -14,6 +14,7 @@ from urllib.parse import quote
 from pydantic import Field
 
 from ctx.graph import GraphSection
+from ctx.heading import canonical_heading
 from ctx.models import (
     Authority,
     ContextPack,
@@ -35,13 +36,13 @@ _FIELD_NAMES = {
     "dependency": "dependencies",
     "exact scope": "exact_scope",
     "scope": "exact_scope",
-    "files/modules": "files_modules",
+    "files modules": "files_modules",
     "files": "files_modules",
-    "interfaces/models": "interfaces_models",
+    "interfaces models": "interfaces_models",
     "interfaces": "interfaces_models",
     "models": "interfaces_models",
     "cli behavior": "cli_behavior",
-    "tests/acceptance criteria": "tests_acceptance_criteria",
+    "tests acceptance criteria": "tests_acceptance_criteria",
     "tests": "tests_acceptance_criteria",
     "acceptance criteria": "tests_acceptance_criteria",
     "failure conditions": "failure_conditions",
@@ -110,8 +111,7 @@ class CheckpointContext(StrictModel):
 
 
 def _canonical_field(value: str) -> str | None:
-    normalized = re.sub(r"\s+", " ", value.strip().casefold().replace("_", " "))
-    return _FIELD_NAMES.get(normalized)
+    return _FIELD_NAMES.get(canonical_heading(value).replace("-", " "))
 
 
 def _clean_values(text: str) -> list[str]:
@@ -175,9 +175,14 @@ def recognize_checkpoints(
     records: list[CheckpointMetadata] = []
     for root in sections:
         match = _CHECKPOINT.match(root.heading)
-        if not match:
+        canonical_match = re.match(r"^cp-(\d+)(?:-|$)", canonical_heading(root.heading))
+        if match is None and canonical_match is None:
             continue
-        checkpoint_id = match.group(1).upper()
+        if match is not None:
+            checkpoint_id = match.group(1).upper()
+        else:
+            assert canonical_match is not None
+            checkpoint_id = f"CP-{canonical_match.group(1)}"
         descendants: list[GraphSection] = []
         queue = list(by_parent.get(root.id, []))
         while queue:
@@ -196,7 +201,7 @@ def recognize_checkpoints(
             CheckpointMetadata(
                 document_id=root.document_id,
                 checkpoint_id=checkpoint_id,
-                title=match.group(2).strip(),
+                title=match.group(2).strip() if match is not None else root.heading,
                 root_section_id=root.id,
                 section_ids=tuple(section.id for section in members),
                 fields={key: tuple(values) for key, values in sorted(fields.items())},

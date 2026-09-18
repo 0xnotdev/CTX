@@ -9,6 +9,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol
 
+from ctx.heading import canonical_heading
 from ctx.models import (
     AmbiguousEvidence,
     Authority,
@@ -621,7 +622,7 @@ def build_context_pack(
             checkpoint_id=checkpoint_id.upper(),
         )
         for child in checkpoint.sources[1:]:
-            heading = child.provenance.heading_path[-1].casefold()
+            heading = canonical_heading(child.provenance.heading_path[-1])
             coverage = CoverageCategory.CHECKPOINT_DESCENDANTS
             if "depend" in heading:
                 category = "explicit_dependency"
@@ -823,7 +824,9 @@ def build_context_pack(
                 authority_floor=Authority.NORMATIVE,
                 **{key: value for key, value in filter_kwargs.items() if key != "authority_floor"},
             ):
-                if query.casefold() in hit.source.provenance.heading_path[-1].casefold():
+                if canonical_heading(query) in canonical_heading(
+                    hit.source.provenance.heading_path[-1]
+                ):
                     add(
                         hit.source,
                         category,
