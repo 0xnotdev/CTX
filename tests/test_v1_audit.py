@@ -25,14 +25,14 @@ from ctx.embeddings import HashEmbedding, verify_model, write_manifest
 from ctx.models import Authority, ResolutionStatus
 from ctx.service import AmbiguousCheckpointError, ContextEngine, create_context_engine
 from ctx.store import SCHEMA_VERSION, SQLiteStore
+from tests.source_fixtures import write_exact_source
 
 
 def configured(root: Path, files: dict[str, str]) -> None:
     initialize_workspace(root)
     for path, text in files.items():
         target = root / path
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(text, encoding="utf-8")
+        write_exact_source(target, text)
         add_document_config(root, path, Authority.NORMATIVE)
 
 

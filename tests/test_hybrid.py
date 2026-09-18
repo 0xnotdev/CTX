@@ -5,6 +5,7 @@ from ctx.embeddings import HashEmbedding
 from ctx.models import Authority
 from ctx.retrieval import classify_query
 from ctx.service import ContextEngine
+from tests.source_fixtures import write_exact_source
 
 
 def test_query_classifier_recognizes_structural_syntax() -> None:
@@ -46,14 +47,14 @@ Repeated experiments should preserve deterministic trial evidence and seeds.
 
 def test_hybrid_returns_bounded_whole_sections_with_stable_order(tmp_path: Path) -> None:
     initialize_workspace(tmp_path)
-    (tmp_path / "a.md").write_text(
+    write_exact_source(
+        tmp_path / "a.md",
         "# Timeout policy\nStabilize network state before timeout failure.\n"
         "# Other\nUnrelated material.\n",
-        encoding="utf-8",
     )
-    (tmp_path / "b.md").write_text(
+    write_exact_source(
+        tmp_path / "b.md",
         "# Generated timeout\nStabilize network state before timeout failure.\n",
-        encoding="utf-8",
     )
     add_document_config(tmp_path, "a.md", Authority.NORMATIVE)
     add_document_config(tmp_path, "b.md", Authority.GENERATED, 100)

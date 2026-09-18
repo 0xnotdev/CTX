@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import os
 import stat
 import sys
@@ -19,6 +20,7 @@ from ctx.config import (
 )
 from ctx.models import Authority
 from ctx.service import ContextEngine, StaleIndexError
+from tests.source_fixtures import read_exact_source, write_exact_source
 
 
 def test_query_result_line_and_read_only_source_bounds(tmp_path: Path) -> None:
@@ -43,6 +45,53 @@ def test_query_result_line_and_read_only_source_bounds(tmp_path: Path) -> None:
                 engine.search("line")
     finally:
         source.chmod(0o644)
+
+
+@pytest.mark.parametrize("line_ending", ["\n", "\r\n"], ids=["lf", "crlf"])
+def test_source_newlines_are_preserved_in_text_ranges_and_hashes(
+    tmp_path: Path, line_ending: str
+) -> None:
+    initialize_workspace(tmp_path)
+    source_text = line_ending.join(("# One", "alpha", "## Child", "beta", ""))
+    source_path = tmp_path / "newlines.md"
+    write_exact_source(source_path, source_text)
+    config = add_document_config(tmp_path, "newlines.md", Authority.NORMATIVE)
+
+    assert source_path.read_bytes() == source_text.encode("utf-8")
+    assert source_path.read_text(encoding="utf-8") == source_text.replace("\r\n", "\n")
+    assert read_exact_source(source_path) == source_text
+    assert read_source(tmp_path, config.documents[0], config.limits) == source_text
+
+    source_hash = hashlib.sha256(source_text.encode("utf-8")).hexdigest()
+    with ContextEngine(tmp_path) as engine:
+        engine.sync_workspace()
+        sections = engine.store.document_sections("newlines.md")
+        assert "".join(section.text for section in sections) == source_text
+        for section in sections:
+            provenance = section.provenance
+            assert provenance.document_sha256 == source_hash
+            assert source_text[provenance.start_offset : provenance.end_offset] == section.text
+            assert (
+                hashlib.sha256(section.text.encode("utf-8")).hexdigest() == provenance.range_sha256
+            )
+            assert provenance.section_sha256 == provenance.range_sha256
+
+        hit = engine.search_exact("Child", limit=1)[0].source
+        hit_provenance = hit.provenance
+        assert source_text[hit_provenance.start_offset : hit_provenance.end_offset] == hit.text
+        assert hashlib.sha256(hit.text.encode("utf-8")).hexdigest() == hit_provenance.range_sha256
+
+        chunks = engine.store.connection.execute(
+            "SELECT start_offset,end_offset,source_text,source_sha256 FROM search_chunks"
+        ).fetchall()
+        assert chunks
+        for chunk in chunks:
+            start, end = int(chunk["start_offset"]), int(chunk["end_offset"])
+            assert source_text[start:end] == chunk["source_text"]
+            assert (
+                hashlib.sha256(source_text[start:end].encode("utf-8")).hexdigest()
+                == chunk["source_sha256"]
+            )
 
 
 def test_config_write_without_posix_fchmod(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

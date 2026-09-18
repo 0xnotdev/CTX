@@ -18,6 +18,7 @@ from ctx.cli import app
 from ctx.config import add_document_config, initialize_workspace, load_config, save_config
 from ctx.models import Authority, CompletenessStatus, CoverageCategory, CoverageStatus
 from ctx.service import ContextEngine, SemanticRetrievalError, create_context_engine
+from tests.source_fixtures import read_exact_source, write_exact_source
 
 
 class ConceptEmbedding:
@@ -58,7 +59,7 @@ class QueryFailureEmbedding(ConceptEmbedding):
 def _configure(root: Path, documents: dict[str, str]) -> None:
     initialize_workspace(root)
     for path, text in documents.items():
-        (root / path).write_text(text, encoding="utf-8")
+        write_exact_source(root / path, text)
         add_document_config(root, path, Authority.NORMATIVE)
 
 
@@ -237,7 +238,7 @@ def test_strict_agent_cross_document_completeness_and_exact_omissions(
             assert omission.section_id
             assert omission.start_line and omission.end_line
             assert omission.range_sha256
-            source = (tmp_path / omission.document_path).read_text(encoding="utf-8")
+            source = read_exact_source(tmp_path / omission.document_path)
             assert hashlib.sha256(source.encode()).hexdigest() == omission.range_sha256
             assert "strict cross-document discovery" in omission.reason
 

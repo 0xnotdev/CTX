@@ -11,6 +11,7 @@ from ctx.checkpoints import checkpoint_artifact_path
 from ctx.config import add_document_config, initialize_workspace
 from ctx.models import Authority, CompletenessStatus
 from ctx.service import ContextEngine, StaleIndexError
+from tests.source_fixtures import read_exact_source, write_exact_source
 
 
 def _large_spec() -> str:
@@ -66,7 +67,7 @@ def _write_corpus(root: Path) -> None:
     initialize_workspace(root)
     priorities = {"spec.md": 10, "architecture.md": 5, "security.md": 5}
     for path, text in documents.items():
-        (root / path).write_text(text, encoding="utf-8")
+        write_exact_source(root / path, text)
         add_document_config(root, path, Authority.NORMATIVE, priorities[path])
 
 
@@ -142,14 +143,14 @@ def test_realistic_pre_use_large_corpus_release_gate(
         assert {item.index_generation for item in complete.items} == {complete.index_generation}
         for item in complete.items:
             provenance = item.source.provenance
-            source = (tmp_path / provenance.document_path).read_text(encoding="utf-8")
+            source = read_exact_source(tmp_path / provenance.document_path)
             assert source[provenance.start_offset : provenance.end_offset] == item.source.text
             assert hashlib.sha256(item.source.text.encode()).hexdigest() == provenance.range_sha256
 
         canonical = engine.search_exact("unicode punctuation résumé", limit=2)
         assert canonical[0].source.provenance.heading_path[-1] == "Unicode／Punctuation (Résumé) 🙂"
 
-        (tmp_path / "spec.md").write_text(_large_spec() + "\n<!-- stale -->\n", encoding="utf-8")
+        write_exact_source(tmp_path / "spec.md", _large_spec() + "\n<!-- stale -->\n")
         with pytest.raises(StaleIndexError):
             engine.search("DISTANT_ALPHA", limit=2)
         changed = engine.sync_workspace()

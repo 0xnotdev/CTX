@@ -18,6 +18,7 @@ from ctx.parser import (
     sha256_text,
 )
 from ctx.service import ContextEngine
+from tests.source_fixtures import read_exact_source, write_exact_source
 
 
 class _ConceptEmbedding:
@@ -98,8 +99,9 @@ def test_semantic_windows_cross_old_boundary_overlap_and_preserve_authority() ->
 def test_low_lexical_overlap_semantic_query_hydrates_exact_source(tmp_path: Path) -> None:
     initialize_workspace(tmp_path)
     target = "# Maintenance\nThe automobile engine repair procedure preserves the warranty.\n"
-    (tmp_path / "manual.md").write_text(
-        target + "# Access control\nSecurity policy for credentials.\n", encoding="utf-8"
+    write_exact_source(
+        tmp_path / "manual.md",
+        target + "# Access control\nSecurity policy for credentials.\n",
     )
     add_document_config(tmp_path, "manual.md", Authority.NORMATIVE)
 
@@ -111,7 +113,7 @@ def test_low_lexical_overlap_semantic_query_hydrates_exact_source(tmp_path: Path
         provenance = hit.source.provenance
         assert provenance.range_sha256 == hashlib.sha256(target.encode()).hexdigest()
         assert provenance.section_sha256 == provenance.range_sha256
-        current = (tmp_path / provenance.document_path).read_text(encoding="utf-8")
+        current = read_exact_source(tmp_path / provenance.document_path)
         assert current[provenance.start_offset : provenance.end_offset] == hit.source.text
 
 
