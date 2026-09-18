@@ -235,6 +235,7 @@ def create_server(
         exclude_documents: list[str] | None = None,
         heading_prefix: list[str] | None = None,
         scope: str | None = None,
+        allow_required_budget_expansion: bool = False,
     ) -> Any:
         """Build an exact-source pack bounded over its complete MCP serialization."""
         filters = filter_args(
@@ -247,7 +248,12 @@ def create_server(
         )
         try:
             data = bounded(
-                engine.get_context_pack(task, token_budget, **filters).model_dump(mode="json")
+                engine.get_context_pack(
+                    task,
+                    token_budget,
+                    allow_required_budget_expansion=allow_required_budget_expansion,
+                    **filters,
+                ).model_dump(mode="json")
             )
         except ContextBudgetTooSmall as error:
             return machine_error(error)
@@ -273,12 +279,16 @@ def create_server(
         checkpoint_id: Query,
         token_budget: TokenBudget = 7_000,
         document: str | None = None,
+        allow_required_budget_expansion: bool = False,
     ) -> Any:
         """Return checkpoint evidence, applicable security/errors, and a bounded pack."""
         try:
             data = bounded(
                 engine.get_checkpoint_context(
-                    checkpoint_id, document=document, token_budget=token_budget
+                    checkpoint_id,
+                    document=document,
+                    token_budget=token_budget,
+                    allow_required_budget_expansion=allow_required_budget_expansion,
                 ).model_dump(mode="json")
             )
             return structured_result(data)

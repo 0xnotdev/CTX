@@ -859,6 +859,7 @@ class ContextEngine:
         *,
         document: str | None = None,
         token_budget: int = 7_000,
+        allow_required_budget_expansion: bool = False,
     ) -> CheckpointContext:
         checkpoint = self.get_checkpoint(checkpoint_id, document=document)
         dependencies: list[ReferenceResult] = []
@@ -925,7 +926,8 @@ class ContextEngine:
         pack = self.get_context_pack(
             f"Implement {checkpoint.metadata.checkpoint_id} — {checkpoint.metadata.title}",
             token_budget,
-            documents={checkpoint.metadata.document_id},
+            allow_required_budget_expansion=allow_required_budget_expansion,
+            _checkpoint_document=checkpoint.metadata.document_id,
         )
         unique_interfaces = {source.provenance.section_id: source for source in interfaces}
         security_context = tuple(security.values())
@@ -949,6 +951,8 @@ class ContextEngine:
         task: str,
         token_budget: int,
         *,
+        allow_required_budget_expansion: bool = False,
+        _checkpoint_document: str | None = None,
         documents: set[str] | None = None,
         authority_floor: Authority | None = None,
         authorities: set[Authority] | None = None,
@@ -975,6 +979,8 @@ class ContextEngine:
                     heading_prefix=heading_prefix,
                     scope=scope,
                 ),
+                allow_required_budget_expansion=allow_required_budget_expansion,
+                checkpoint_document=_checkpoint_document,
             )
 
     def get_references(self, section_id: str, *, incoming: bool = False) -> list[ReferenceResult]:

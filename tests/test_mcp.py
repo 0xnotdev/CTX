@@ -28,7 +28,7 @@ def test_stdio_mcp_lists_tools_and_uses_shared_services(tmp_path: Path) -> None:
         section_id = engine.search_exact("CP-14", limit=1)[0].source.provenance.section_id
         direct_pack_ids = [
             item.source.provenance.section_id
-            for item in engine.get_context_pack("Implement CP-14", 1_500).items
+            for item in engine.get_context_pack("Implement CP-14", 2_500).items
         ]
 
     async def exercise() -> None:
@@ -74,11 +74,13 @@ def test_stdio_mcp_lists_tools_and_uses_shared_services(tmp_path: Path) -> None:
                 )
 
                 packed = await session.call_tool(
-                    "get_context_pack", {"task": "Implement CP-14", "token_budget": 1_500}
+                    "get_context_pack", {"task": "Implement CP-14", "token_budget": 2_500}
                 )
                 assert not packed.is_error
                 assert packed.structured_content is not None
-                assert packed.structured_content["estimated_tokens"] <= 1_500
+                assert packed.structured_content["estimated_tokens"] <= 2_500
+                assert packed.structured_content["completeness_status"]
+                assert packed.structured_content["category_coverage"]
                 assert packed.structured_content["items"]
                 mcp_pack_ids = [
                     item["source"]["provenance"]["section_id"]
@@ -184,12 +186,12 @@ def test_official_v2_client_all_tools_concurrency_and_clean_disconnect(tmp_path:
                         {
                             "checkpoint_id": "CP-14",
                             "document": "spec.md",
-                            "token_budget": 4_000,
+                            "token_budget": 15_000,
                         },
                     ),
                     (
                         "get_context_pack",
-                        {"task": "Implement CP-14", "token_budget": 2_000},
+                        {"task": "Implement CP-14", "token_budget": 8_000},
                     ),
                 )
                 for name, arguments in calls:
@@ -218,7 +220,7 @@ def test_official_v2_client_all_tools_concurrency_and_clean_disconnect(tmp_path:
                 pending = asyncio.create_task(
                     session.call_tool(
                         "get_context_pack",
-                        {"task": "Implement CP-14", "token_budget": 2_000},
+                        {"task": "Implement CP-14", "token_budget": 8_000},
                     )
                 )
                 await asyncio.sleep(0)

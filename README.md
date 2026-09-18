@@ -31,6 +31,8 @@ ctx add architecture.md --authority normative
 ctx add research.md --authority reference
 ctx index --no-embeddings
 ctx pack "Implement CP-14" --token-budget 7000 --json
+# Explicit policy opt-in; output discloses requested and expanded effective budget:
+ctx pack "Implement CP-14" --token-budget 7000 --allow-required-budget-expansion --json
 ```
 
 The default search response is a match-centered exact `SourceExcerpt`; request
@@ -58,10 +60,13 @@ artifacts produce an explicit `structural+lexical` fallback, shown in status/pac
 ## Agent workflow
 
 1. Call `get_context_pack` (or `ctx pack`) for the task/checkpoint.
-2. Inspect the exact returned source, range hash, section hash, authority, and generation.
-3. Re-read decisive IDs with `get_section`/`get_lines` if complete wording is needed.
-4. Code only from authoritative source; never treat graph/generated prose as a requirement.
-5. Stop on stale source, checkpoint ambiguity, or an insufficient/primary-too-large budget.
+2. Require the reported completeness status and per-category coverage your task needs; inspect
+   every required omission, ambiguity, and conflict.
+3. Inspect the exact returned source, range hash, section hash, authority, and generation.
+4. Re-read decisive IDs with `get_section`/`get_lines` if complete wording is needed.
+5. Code only from authoritative source; never treat graph/generated prose as a requirement.
+6. Stop on stale source, ambiguity/conflict, `PARTIAL`, or an insufficient/primary-too-large
+   budget. Increase the requested budget, or explicitly opt into required-budget expansion.
 
 Useful commands:
 

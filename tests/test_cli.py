@@ -42,9 +42,10 @@ def test_complete_cli_workflow(tmp_path: Path, monkeypatch) -> None:  # type: ig
     assert exact.exit_code == 0
     assert json.loads(exact.stdout)["text"].startswith("# CP-14")
 
-    packed = runner.invoke(app, ["pack", "Implement CP-14", "--token-budget", "1000", "--json"])
+    packed = runner.invoke(app, ["pack", "Implement CP-14", "--token-budget", "2000", "--json"])
     assert packed.exit_code == 0, packed.output
-    assert json.loads(packed.stdout)["estimated_tokens"] <= 1000
+    assert json.loads(packed.stdout)["estimated_tokens"] <= 2000
+    assert json.loads(packed.stdout)["completeness_status"] == "COMPLETE"
     assert runner.invoke(app, ["status", "--json"]).exit_code == 0
     assert runner.invoke(app, ["docs", "--json"]).exit_code == 0
     assert runner.invoke(app, ["outline", "spec.md", "--json"]).exit_code == 0

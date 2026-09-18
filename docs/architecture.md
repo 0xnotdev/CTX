@@ -64,7 +64,18 @@ fields, interfaces/models, global normative constraints, task-specific error/sec
 and semantic fallback. Generic auxiliary searches are conditional. Ambiguous graph records have
 no target and cannot be treated as certainty. Every selected item reports category, reason,
 relevance, confidence and authority. A requested checkpoint root is first and cannot be displaced;
-insufficient room produces `PRIMARY_REQUIREMENT_TOO_LARGE`.
+insufficient room produces `PRIMARY_REQUIREMENT_TOO_LARGE`. Checkpoint context can resolve its
+root in one document while retaining required cross-document graph targets.
+
+Every pack reports top-level `COMPLETE`, `PARTIAL`, `AMBIGUOUS`, `CONFLICTING`, or
+`NOT_APPLICABLE` and explicit coverage for primary evidence, dependencies, architecture,
+security, acceptance, verification, and checkpoint descendants. Required evidence is derived
+from checkpoint structure/resolved graph edges or direct query-term coverage; optional neighbors
+do not make a pack partial. Each dropped required range has an actionable document, section,
+checkpoint/dependency where applicable, line range, and range hash. Ambiguities retain candidate
+source refs and conflicts remain compact refs. Status precedence is conflict, ambiguity, required
+omission, complete coverage, then not-applicable; callers must inspect the records rather than
+interpreting the enum as a substitute for source.
 
 ## Serialized token budgets
 
@@ -74,12 +85,17 @@ A counter implements `identity`, `count_text`, and `count_serialized`. Supported
 - `APPROXIMATE_GENERIC` (default): UTF-8 bytes/3 with an explicit 15% serialized margin;
 - `MODEL_SPECIFIC`: injectable exact tokenizer implementations.
 
-The budget includes task, JSON keys/escaping, provenance, omissions, compact conflict refs,
-structured MCP result and JSON-RPC envelope. A fixed-point count includes the count fields
-themselves. Results expose method/identity, safety margin, content, metadata and serialized token
-counts. If even the empty envelope cannot fit, `ContextBudgetTooSmall` gives requested, minimum,
-task estimate and metadata overhead. `PossibleConflict` contains compact `SourceRef`s, never
-another source copy.
+The budget includes task, JSON keys/escaping, provenance, category coverage, required omissions,
+ambiguities, compact conflict refs, structured MCP result and JSON-RPC envelope. A fixed-point
+count includes the count fields themselves. Results expose requested/effective budget,
+method/identity, safety margin, content, metadata and serialized token counts. Strict mode never
+silently expands: required evidence that cannot fit makes the result honestly `PARTIAL`, while an
+unfit primary keeps the machine-readable error. The explicit CLI/MCP/API
+`allow_required_budget_expansion` option may raise the effective budget up to the configured
+maximum to return all required evidence, and discloses `budget_expanded=true` plus actual use. If
+even the empty envelope cannot fit, `ContextBudgetTooSmall` gives requested, minimum, task
+estimate and metadata overhead. `PossibleConflict` contains compact `SourceRef`s, never another
+source copy.
 
 ## SQLite V2 and generations
 

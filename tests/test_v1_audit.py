@@ -82,7 +82,7 @@ def test_multichunk_tail_search_and_match_centered_pack(tmp_path: Path) -> None:
         assert len(hit.source.text) < len(full.text) // 5
         assert hit.source.provenance.section_sha256 == full.provenance.section_sha256
         assert hit.source.provenance.range_sha256 != full.provenance.range_sha256
-        pack = engine.get_context_pack("Implement TAIL_NEEDLE cobalt", 2_000)
+        pack = engine.get_context_pack("Implement TAIL_NEEDLE cobalt", 2_500)
         assert any("TAIL_NEEDLE" in item.source.text for item in pack.items)
         assert all(item.index_generation == pack.index_generation for item in pack.items)
 

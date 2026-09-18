@@ -50,9 +50,9 @@ Sections are authoritative and chunks are search-only.
         indexed = engine.index_workspace()
         assert indexed.documents_added == 3
         pack = engine.get_context_pack(
-            "Implement CP-14 with RunManifest and INVALID_EVIDENCE", 7_000
+            "Implement CP-14 with RunManifest and INVALID_EVIDENCE", 15_000
         )
-        assert pack.estimated_tokens <= 7_000
+        assert pack.estimated_tokens <= 15_000
         headings = [item.source.provenance.heading_path[-1] for item in pack.items]
         assert any(heading.startswith("CP-14") for heading in headings)
         assert any(heading.startswith("CP-2") for heading in headings)

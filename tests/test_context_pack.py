@@ -25,7 +25,7 @@ Acceptance: run `pytest tests/test_trials.py`. Verify: `ctx status`.
     add_document_config(tmp_path, "spec.md", Authority.NORMATIVE)
     with ContextEngine(tmp_path) as engine:
         engine.index_workspace()
-        pack = engine.get_context_pack("Implement CP-14 using RunManifest", 4_000)
+        pack = engine.get_context_pack("Implement CP-14 using RunManifest", 5_000)
         headings = [item.source.provenance.heading_path[-1] for item in pack.items]
         categories = {item.category for item in pack.items}
         assert headings[0].startswith("CP-14")
@@ -58,8 +58,8 @@ def test_pack_truncation_uses_ast_safe_ranges_and_reports_omissions(tmp_path: Pa
     add_document_config(tmp_path, "large.md", Authority.NORMATIVE)
     with ContextEngine(tmp_path) as engine:
         engine.index_workspace()
-        pack = engine.get_context_pack("CP-14 Table", 1_000)
-        assert pack.estimated_tokens <= 1_000
+        pack = engine.get_context_pack("CP-14 Table", 1_500)
+        assert pack.estimated_tokens <= 1_500
         assert pack.items
         direct = pack.items[0]
         assert direct.source.text.startswith("# CP-14")
@@ -85,7 +85,7 @@ def test_possible_conflict_is_conservative_and_source_labeled(tmp_path: Path) ->
     add_document_config(tmp_path, "history.md", Authority.HISTORICAL)
     with ContextEngine(tmp_path) as engine:
         engine.index_workspace()
-        pack = engine.get_context_pack("NetworkPolicy ingress", 2_000)
+        pack = engine.get_context_pack("NetworkPolicy ingress", 3_000)
         assert pack.possible_conflicts
         conflict = pack.possible_conflicts[0]
         assert conflict.label == "POSSIBLE_CONFLICT"

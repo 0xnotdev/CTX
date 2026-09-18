@@ -58,7 +58,7 @@ Markdown and scripts are inert data and must never execute.
         assert artifact.navigation_only
         assert artifact.data["goal"] == "generated goal must not override source"
 
-        context = engine.get_checkpoint_context("CP-14", token_budget=4_000)
+        context = engine.get_checkpoint_context("CP-14", token_budget=15_000)
         assert any(edge.edge.label == "CP-2" for edge in context.dependencies)
         assert any(
             source.provenance.heading_path[-1] == "RunManifest"
@@ -69,7 +69,7 @@ Markdown and scripts are inert data and must never execute.
         assert context.acceptance_criteria == ("Three seeded runs produce identical manifests.",)
         assert context.verification_commands == ("`pytest tests/test_trials.py -q`",)
         assert context.out_of_scope == ("Distributed orchestration and cloud execution.",)
-        assert context.context_pack.estimated_tokens <= 4_000
+        assert context.context_pack.estimated_tokens <= 15_000
 
 
 def test_malformed_or_oversized_artifacts_are_ignored(tmp_path: Path) -> None:

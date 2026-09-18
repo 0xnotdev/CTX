@@ -67,6 +67,32 @@ class BudgetMethod(StrEnum):
     MODEL_SPECIFIC = "MODEL_SPECIFIC"
 
 
+class CompletenessStatus(StrEnum):
+    COMPLETE = "COMPLETE"
+    PARTIAL = "PARTIAL"
+    AMBIGUOUS = "AMBIGUOUS"
+    CONFLICTING = "CONFLICTING"
+    NOT_APPLICABLE = "NOT_APPLICABLE"
+
+
+class CoverageCategory(StrEnum):
+    PRIMARY = "primary"
+    DEPENDENCIES = "dependencies"
+    ARCHITECTURE = "architecture"
+    SECURITY = "security"
+    ACCEPTANCE = "acceptance"
+    VERIFICATION = "verification"
+    CHECKPOINT_DESCENDANTS = "checkpoint_descendants"
+
+
+class CoverageStatus(StrEnum):
+    COVERED = "COVERED"
+    OMITTED = "OMITTED"
+    AMBIGUOUS = "AMBIGUOUS"
+    CONFLICTING = "CONFLICTING"
+    NOT_APPLICABLE = "NOT_APPLICABLE"
+
+
 class SourceRange(StrictModel):
     """Unambiguous exact contiguous source range.
 
@@ -363,10 +389,45 @@ class PossibleConflict(StrictModel):
     sources: tuple[SourceRef, SourceRef]
 
 
+class OmittedRequiredEvidence(StrictModel):
+    schema_version: Literal[1] = 1
+    category: CoverageCategory
+    reason: str
+    document_id: str | None = None
+    document_path: str | None = None
+    section_id: str | None = None
+    checkpoint_id: str | None = None
+    dependency: str | None = None
+    start_line: int | None = None
+    end_line: int | None = None
+    range_sha256: str | None = None
+
+
+class AmbiguousEvidence(StrictModel):
+    schema_version: Literal[1] = 1
+    category: CoverageCategory
+    label: str
+    reason: str
+    source: SourceRef
+    candidates: tuple[SourceRef, ...] = ()
+
+
+class CategoryCoverage(StrictModel):
+    schema_version: Literal[1] = 1
+    category: CoverageCategory
+    status: CoverageStatus
+    required: bool
+    evidence: tuple[SourceRef, ...] = ()
+    omitted_count: int = 0
+    notes: tuple[str, ...] = ()
+
+
 class ContextPack(StrictModel):
-    schema_version: Literal[2] = 2
+    schema_version: Literal[3] = 3
     task: str
+    requested_token_budget: int
     token_budget: int
+    budget_expanded: bool = False
     budget_method: BudgetMethod
     budget_counter_identity: str
     budget_safety_margin: int
@@ -376,6 +437,10 @@ class ContextPack(StrictModel):
     estimated_tokens: int
     token_count_method: str
     items: tuple[ContextPackItem, ...]
+    completeness_status: CompletenessStatus
+    category_coverage: tuple[CategoryCoverage, ...]
+    omitted_required_evidence: tuple[OmittedRequiredEvidence, ...] = ()
+    ambiguous_evidence: tuple[AmbiguousEvidence, ...] = ()
     omitted_relevant_sections: tuple[str, ...]
     possible_conflicts: tuple[PossibleConflict, ...] = ()
     index_generation: int

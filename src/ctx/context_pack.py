@@ -10,13 +10,20 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol
 
 from ctx.models import (
+    AmbiguousEvidence,
     Authority,
     BudgetMethod,
+    CategoryCoverage,
+    CompletenessStatus,
     ContextPack,
     ContextPackItem,
+    CoverageCategory,
+    CoverageStatus,
     EdgeType,
     FilterSet,
+    OmittedRequiredEvidence,
     PossibleConflict,
+    ResolutionStatus,
     SourceItem,
 )
 from ctx.retrieval import classify_query
@@ -130,6 +137,10 @@ class _Candidate:
     confidence: float
     sequence: int
     primary: bool = False
+    required: bool = False
+    coverage_categories: tuple[CoverageCategory, ...] = ()
+    checkpoint_id: str | None = None
+    dependency: str | None = None
 
 
 _CATEGORIES = {
@@ -214,12 +225,121 @@ def _counter_name(counter: TokenCounter) -> str:
     return counter.identity
 
 
+def _candidate_range_key(candidate: _Candidate) -> tuple[str, int, int]:
+    provenance = candidate.source.provenance
+    return (provenance.section_id, provenance.start_offset, provenance.end_offset)
+
+
+def _coverage_state(
+    candidates: Sequence[_Candidate],
+    selected: dict[tuple[str, int, int], ContextPackItem],
+    unresolved: Sequence[OmittedRequiredEvidence],
+    ambiguous: Sequence[AmbiguousEvidence],
+    conflicts: tuple[PossibleConflict, ...],
+) -> tuple[
+    CompletenessStatus,
+    tuple[CategoryCoverage, ...],
+    tuple[OmittedRequiredEvidence, ...],
+]:
+    omissions = list(unresolved)
+    missing = [
+        candidate
+        for candidate in candidates
+        if candidate.required and _candidate_range_key(candidate) not in selected
+    ]
+    for candidate in missing:
+        provenance = candidate.source.provenance
+        # One actionable record identifies one missing range. Category coverage below still marks
+        # every applicable category (including checkpoint_descendants) without duplicating this
+        # provenance-heavy record.
+        category = candidate.coverage_categories[-1]
+        omissions.append(
+            OmittedRequiredEvidence(
+                category=category,
+                reason="required evidence did not fit the context-pack budget",
+                document_id=provenance.document_id,
+                document_path=provenance.document_path,
+                section_id=provenance.section_id,
+                checkpoint_id=candidate.checkpoint_id,
+                dependency=candidate.dependency,
+                start_line=provenance.start_line,
+                end_line=provenance.end_line,
+                range_sha256=provenance.range_sha256,
+            )
+        )
+
+    conflict_hashes = {source.range_sha256 for conflict in conflicts for source in conflict.sources}
+    coverage_records: list[CategoryCoverage] = []
+    for category in CoverageCategory:
+        applicable = [
+            candidate for candidate in candidates if category in candidate.coverage_categories
+        ]
+        evidence = tuple(
+            dict.fromkeys(
+                selected[_candidate_range_key(candidate)].source.ref
+                for candidate in applicable
+                if _candidate_range_key(candidate) in selected
+            )
+        )
+        category_missing = [
+            candidate for candidate in missing if category in candidate.coverage_categories
+        ]
+        category_omissions = [item for item in unresolved if item.category is category]
+        category_ambiguous = [item for item in ambiguous if item.category is category]
+        category_conflicting = any(item.range_sha256 in conflict_hashes for item in evidence)
+        required = any(candidate.required for candidate in applicable) or bool(
+            category_omissions or category_ambiguous
+        )
+        notes: list[str] = []
+        if category_ambiguous:
+            status = CoverageStatus.AMBIGUOUS
+            notes.extend(item.reason for item in category_ambiguous)
+        elif category_missing or category_omissions:
+            status = CoverageStatus.OMITTED
+            notes.append("one or more required evidence ranges are absent")
+        elif category_conflicting:
+            status = CoverageStatus.CONFLICTING
+            notes.append("selected evidence contains a compact possible-conflict record")
+        elif applicable:
+            status = CoverageStatus.COVERED
+        else:
+            status = CoverageStatus.NOT_APPLICABLE
+        coverage_records.append(
+            CategoryCoverage(
+                category=category,
+                status=status,
+                required=required,
+                evidence=evidence,
+                omitted_count=len(category_missing) + len(category_omissions),
+                notes=tuple(dict.fromkeys(notes)),
+            )
+        )
+
+    if conflicts:
+        top = CompletenessStatus.CONFLICTING
+    elif ambiguous:
+        top = CompletenessStatus.AMBIGUOUS
+    elif omissions:
+        top = CompletenessStatus.PARTIAL
+    elif any(item.status is CoverageStatus.COVERED for item in coverage_records):
+        top = CompletenessStatus.COMPLETE
+    else:
+        top = CompletenessStatus.NOT_APPLICABLE
+    return top, tuple(coverage_records), tuple(omissions)
+
+
 def _pack(
     *,
     task: str,
+    requested_budget: int,
     budget: int,
+    budget_expanded: bool,
     counter: TokenCounter,
     items: Sequence[ContextPackItem],
+    completeness_status: CompletenessStatus,
+    category_coverage: Sequence[CategoryCoverage],
+    omitted_required: Sequence[OmittedRequiredEvidence],
+    ambiguous: Sequence[AmbiguousEvidence],
     omitted: Sequence[str],
     conflicts: tuple[PossibleConflict, ...],
     generation: int,
@@ -234,7 +354,9 @@ def _pack(
     for _ in range(8):
         result = ContextPack(
             task=task,
+            requested_token_budget=requested_budget,
             token_budget=budget,
+            budget_expanded=budget_expanded,
             budget_method=counter.method,
             budget_counter_identity=counter.identity,
             budget_safety_margin=safety,
@@ -244,6 +366,10 @@ def _pack(
             estimated_tokens=serialized + safety,
             token_count_method=counter.identity,
             items=tuple(items),
+            completeness_status=completeness_status,
+            category_coverage=tuple(category_coverage),
+            omitted_required_evidence=tuple(omitted_required),
+            ambiguous_evidence=tuple(ambiguous),
             omitted_relevant_sections=tuple(dict.fromkeys(omitted)),
             possible_conflicts=conflicts,
             index_generation=generation,
@@ -268,6 +394,17 @@ def _pack(
     )
 
 
+def _empty_coverage() -> tuple[CategoryCoverage, ...]:
+    return tuple(
+        CategoryCoverage(
+            category=category,
+            status=CoverageStatus.NOT_APPLICABLE,
+            required=False,
+        )
+        for category in CoverageCategory
+    )
+
+
 def _minimum_base(
     *,
     task: str,
@@ -278,9 +415,15 @@ def _minimum_base(
     def required(field_budget: int) -> tuple[int, int]:
         pack = _pack(
             task=task,
+            requested_budget=field_budget,
             budget=field_budget,
+            budget_expanded=False,
             counter=counter,
             items=(),
+            completeness_status=CompletenessStatus.NOT_APPLICABLE,
+            category_coverage=_empty_coverage(),
+            omitted_required=(),
+            ambiguous=(),
             omitted=(),
             conflicts=(),
             generation=generation,
@@ -338,6 +481,8 @@ def build_context_pack(
     *,
     filters: FilterSet | None = None,
     counter: TokenCounter | None = None,
+    allow_required_budget_expansion: bool = False,
+    checkpoint_document: str | None = None,
 ) -> ContextPack:
     if token_budget < 1:
         raise ValueError("token_budget must be positive")
@@ -355,6 +500,7 @@ def build_context_pack(
         "candidate_count": 0,
         "selected_count": 0,
         "primary_retained": True,
+        "required_budget_expansion_allowed": allow_required_budget_expansion,
     }
     minimum, base_metadata = _minimum_base(
         task=task,
@@ -371,6 +517,8 @@ def build_context_pack(
         )
 
     candidates: dict[tuple[str, int, int], _Candidate] = {}
+    ambiguities: list[AmbiguousEvidence] = []
+    unresolved_required: list[OmittedRequiredEvidence] = []
     sequence = 0
 
     def candidate_key(source: SourceItem) -> tuple[str, int, int]:
@@ -393,7 +541,11 @@ def build_context_pack(
         relevance: float,
         confidence: float,
         primary: bool = False,
-    ) -> None:
+        required: bool = False,
+        coverage_categories: tuple[CoverageCategory, ...] = (),
+        checkpoint_id: str | None = None,
+        dependency: str | None = None,
+    ) -> bool:
         nonlocal sequence
         p = source.provenance
         if p.index_generation != generation:
@@ -403,13 +555,13 @@ def build_context_pack(
             and p.document_path not in filters.documents
             and p.document_id not in filters.documents
         ):
-            return
+            return False
         if p.document_path in filters.exclude_documents:
-            return
+            return False
         if filters.authority_floor is not None and p.authority < filters.authority_floor:
-            return
+            return False
         if filters.authorities and p.authority not in filters.authorities:
-            return
+            return False
         key = candidate_key(source)
         candidate = _Candidate(
             source,
@@ -420,24 +572,39 @@ def build_context_pack(
             confidence,
             sequence,
             primary,
+            required,
+            coverage_categories,
+            checkpoint_id,
+            dependency,
         )
         sequence += 1
         existing = candidates.get(key)
-        if (
-            existing is None
-            or (candidate.primary and not existing.primary)
-            or candidate.category_rank < existing.category_rank
-        ):
+        if existing is None:
             candidates[key] = candidate
-        elif reason not in existing.reason:
-            existing.reason += f"; {reason}"
+            return True
+        merged_categories = tuple(
+            dict.fromkeys((*existing.coverage_categories, *candidate.coverage_categories))
+        )
+        replace = (candidate.primary and not existing.primary) or (
+            candidate.category_rank < existing.category_rank
+        )
+        winner, other = (candidate, existing) if replace else (existing, candidate)
+        winner.required = winner.required or other.required
+        winner.primary = winner.primary or other.primary
+        winner.coverage_categories = merged_categories
+        winner.checkpoint_id = winner.checkpoint_id or other.checkpoint_id
+        winner.dependency = winner.dependency or other.dependency
+        if other.reason not in winner.reason:
+            winner.reason += f"; {other.reason}"
+        candidates[key] = winner
+        return True
 
     filter_kwargs = _filter_kwargs(filters)
     primary_ids = classification.checkpoint_ids
     primary_section_ids: set[str] = set()
     for checkpoint_id in primary_ids:
-        document_filter: str | None = None
-        if filters.documents and len(filters.documents) == 1:
+        document_filter = checkpoint_document
+        if document_filter is None and filters.documents and len(filters.documents) == 1:
             document_filter = next(iter(filters.documents))
         checkpoint = engine.get_checkpoint(checkpoint_id, document=document_filter)
         root = checkpoint.sources[0]
@@ -449,17 +616,28 @@ def build_context_pack(
             relevance=100.0,
             confidence=1.0,
             primary=True,
+            required=True,
+            coverage_categories=(CoverageCategory.PRIMARY,),
+            checkpoint_id=checkpoint_id.upper(),
         )
         for child in checkpoint.sources[1:]:
             heading = child.provenance.heading_path[-1].casefold()
+            coverage = CoverageCategory.CHECKPOINT_DESCENDANTS
             if "depend" in heading:
                 category = "explicit_dependency"
-            elif "interface" in heading or "model" in heading:
+                coverage = CoverageCategory.DEPENDENCIES
+            elif any(value in heading for value in ("interface", "model", "architect")):
                 category = "interface_or_model"
+                coverage = CoverageCategory.ARCHITECTURE
             elif "security" in heading:
                 category = "security_constraint"
-            elif any(value in heading for value in ("test", "accept", "verify")):
+                coverage = CoverageCategory.SECURITY
+            elif "verify" in heading:
                 category = "acceptance_or_verify"
+                coverage = CoverageCategory.VERIFICATION
+            elif "test" in heading or "accept" in heading:
+                category = "acceptance_or_verify"
+                coverage = CoverageCategory.ACCEPTANCE
             elif "failure" in heading or "error" in heading:
                 category = "error_or_failure"
             else:
@@ -470,16 +648,33 @@ def build_context_pack(
                 f"structured field of requested {checkpoint_id.upper()}",
                 relevance=50.0,
                 confidence=1.0,
+                required=True,
+                coverage_categories=tuple(
+                    dict.fromkeys((CoverageCategory.CHECKPOINT_DESCENDANTS, coverage))
+                ),
+                checkpoint_id=checkpoint_id.upper(),
             )
 
     direct = engine.search(task, limit=min(12, engine.config.limits.max_results), **filter_kwargs)
+    uncovered_terms = {
+        term.casefold()
+        for term in re.findall(r"[\w.@/:-]+", task, flags=re.UNICODE)
+        if len(term) > 2 and term.casefold() not in {"implement", "using", "with", "from"}
+    }
     for rank, hit in enumerate(direct, start=1):
+        source_folded = hit.source.text.casefold()
+        covered_terms = {term for term in uncovered_terms if term in source_folded}
+        direct_required = bool(not primary_ids and (rank == 1 or covered_terms))
+        if direct_required:
+            uncovered_terms -= covered_terms
         add(
             hit.source,
             "direct_requirement" if not primary_ids else "semantic_fallback",
             f"direct retrieval rank {rank}; channels={','.join(hit.channels)}",
             relevance=hit.score,
             confidence=max(0.5, 1.0 - rank * 0.04),
+            required=direct_required,
+            coverage_categories=((CoverageCategory.PRIMARY,) if not primary_ids else ()),
         )
 
     edge_categories = {
@@ -490,45 +685,137 @@ def build_context_pack(
     }
     seeds = list(primary_section_ids) or [hit.source.provenance.section_id for hit in direct[:4]]
     checkpoint_children: list[str] = []
+
+    def add_reference(reference: Any, relevance: float) -> None:
+        edge = reference.edge
+        if edge.edge_type not in edge_categories:
+            return
+        reference_coverage: CoverageCategory | None = (
+            CoverageCategory.DEPENDENCIES
+            if edge.edge_type is EdgeType.DEPENDS_ON
+            else CoverageCategory.ARCHITECTURE
+            if edge.edge_type is EdgeType.USES_TYPE
+            else None
+        )
+        required = bool(primary_ids and reference_coverage is not None)
+        if reference.target is None:
+            if not required:
+                return
+            assert reference_coverage is not None
+            if edge.status is ResolutionStatus.AMBIGUOUS:
+                ambiguities.append(
+                    AmbiguousEvidence(
+                        category=reference_coverage,
+                        label=edge.label,
+                        reason=edge.reason,
+                        source=reference.source.ref,
+                        candidates=reference.candidates,
+                    )
+                )
+            else:
+                provenance = reference.source.provenance
+                unresolved_required.append(
+                    OmittedRequiredEvidence(
+                        category=reference_coverage,
+                        reason=f"unresolved required graph evidence: {edge.reason}",
+                        document_id=provenance.document_id,
+                        document_path=provenance.document_path,
+                        section_id=provenance.section_id,
+                        checkpoint_id=primary_ids[0].upper() if primary_ids else None,
+                        dependency=edge.label
+                        if reference_coverage is CoverageCategory.DEPENDENCIES
+                        else None,
+                        start_line=provenance.start_line,
+                        end_line=provenance.end_line,
+                        range_sha256=provenance.range_sha256,
+                    )
+                )
+            return
+        category, reason = edge_categories[edge.edge_type]
+        accepted = add(
+            reference.target,
+            category,
+            f"{reason}: {edge.label}",
+            relevance=relevance,
+            confidence=1.0,
+            required=required,
+            coverage_categories=((reference_coverage,) if reference_coverage is not None else ()),
+            checkpoint_id=primary_ids[0].upper() if primary_ids else None,
+            dependency=(
+                edge.label if reference_coverage is CoverageCategory.DEPENDENCIES else None
+            ),
+        )
+        if required and not accepted and reference_coverage is not None:
+            provenance = reference.target.provenance
+            unresolved_required.append(
+                OmittedRequiredEvidence(
+                    category=reference_coverage,
+                    reason="required graph target excluded by context-pack filters",
+                    document_id=provenance.document_id,
+                    document_path=provenance.document_path,
+                    section_id=provenance.section_id,
+                    checkpoint_id=primary_ids[0].upper(),
+                    dependency=(
+                        edge.label if reference_coverage is CoverageCategory.DEPENDENCIES else None
+                    ),
+                    start_line=provenance.start_line,
+                    end_line=provenance.end_line,
+                    range_sha256=provenance.range_sha256,
+                )
+            )
+
     for section_id in seeds:
         for reference in engine.store.get_references(section_id):
             if reference.edge.edge_type is EdgeType.PARENT_OF and reference.target is not None:
                 checkpoint_children.append(reference.target.provenance.section_id)
-            if reference.target is None or reference.edge.edge_type not in edge_categories:
-                continue  # UNRESOLVED/AMBIGUOUS is never treated as certainty.
-            category, reason = edge_categories[reference.edge.edge_type]
-            add(
-                reference.target,
-                category,
-                f"{reason}: {reference.edge.label}",
-                relevance=25.0,
-                confidence=1.0,
-            )
+            add_reference(reference, 25.0)
     for section_id in checkpoint_children:
         for reference in engine.store.get_references(section_id):
-            if reference.target is None or reference.edge.edge_type not in edge_categories:
-                continue
-            category, reason = edge_categories[reference.edge.edge_type]
-            add(
-                reference.target,
-                category,
-                f"{reason}: {reference.edge.label}",
-                relevance=20.0,
-                confidence=1.0,
-            )
+            add_reference(reference, 20.0)
 
     # For an exact checkpoint, add only heading-evidenced global normative security and
     # acceptance sources when those fields are not descendants. This is structural evidence,
     # not an unconditional generic semantic query.
     if primary_ids:
-        existing_categories = {candidate.category for candidate in candidates.values()}
+        existing_coverage = {
+            coverage
+            for candidate in candidates.values()
+            for coverage in candidate.coverage_categories
+        }
         structural_global = (
-            ("Security", "security_constraint", "security constraint: global normative heading"),
-            ("Tests", "acceptance_or_verify", "global acceptance/verification heading"),
-            ("Verify", "acceptance_or_verify", "global verification heading"),
+            (
+                "Architecture",
+                "interface_or_model",
+                CoverageCategory.ARCHITECTURE,
+                "global normative architecture heading",
+            ),
+            (
+                "Security",
+                "security_constraint",
+                CoverageCategory.SECURITY,
+                "security constraint: global normative heading",
+            ),
+            (
+                "Tests",
+                "acceptance_or_verify",
+                CoverageCategory.ACCEPTANCE,
+                "global acceptance heading",
+            ),
+            (
+                "Acceptance",
+                "acceptance_or_verify",
+                CoverageCategory.ACCEPTANCE,
+                "global acceptance heading",
+            ),
+            (
+                "Verify",
+                "acceptance_or_verify",
+                CoverageCategory.VERIFICATION,
+                "global verification heading",
+            ),
         )
-        for query, category, reason in structural_global:
-            if category in existing_categories:
+        for query, category, global_coverage, reason in structural_global:
+            if global_coverage in existing_coverage:
                 continue
             for hit in engine.search_exact(
                 query,
@@ -543,6 +830,9 @@ def build_context_pack(
                         reason,
                         relevance=15.0,
                         confidence=1.0,
+                        required=True,
+                        coverage_categories=(global_coverage,),
+                        checkpoint_id=primary_ids[0].upper(),
                     )
 
     # Generic searches are conditional fallback, never unconditional pack pollution.
@@ -556,20 +846,28 @@ def build_context_pack(
         fallbacks.append((task, "error_or_failure", "task-specific failure/error evidence"))
     if any(word in folded_task for word in ("test", "acceptance", "verify")):
         fallbacks.append((task, "acceptance_or_verify", "task-specific acceptance evidence"))
+    fallback_coverage = {
+        "security_constraint": CoverageCategory.SECURITY,
+        "acceptance_or_verify": CoverageCategory.ACCEPTANCE,
+    }
     for query, category, reason in fallbacks:
         for rank, hit in enumerate(engine.search(query, limit=3, **filter_kwargs), start=1):
+            fallback_category = fallback_coverage.get(category)
             add(
                 hit.source,
                 category,
                 f"{reason}; rank {rank}",
                 relevance=hit.score,
                 confidence=0.6,
+                required=fallback_category is not None,
+                coverage_categories=((fallback_category,) if fallback_category is not None else ()),
             )
 
     ordered = sorted(
         candidates.values(),
         key=lambda item: (
             not item.primary,
+            not item.required,
             item.category_rank,
             -item.relevance,
             -int(item.source.provenance.authority),
@@ -578,7 +876,9 @@ def build_context_pack(
         ),
     )
     selected: list[ContextPackItem] = []
+    selected_by_key: dict[tuple[str, int, int], ContextPackItem] = {}
     selected_keys: set[tuple[str, int, int]] = set()
+    working_budget = token_budget
     all_keys = [
         (
             item.source.provenance.section_id,
@@ -589,7 +889,9 @@ def build_context_pack(
     ]
 
     def omission_label(key: tuple[str, int, int]) -> str:
-        return f"{key[0]}@{key[1]}:{key[2]}"
+        # Legacy optional omission summary remains compact. Required omissions below carry the
+        # exact document/section/range location.
+        return key[0]
 
     def item(candidate: _Candidate, source: SourceItem) -> ContextPackItem:
         return ContextPackItem(
@@ -615,20 +917,31 @@ def build_context_pack(
             options.append(excerpt)
         accepted = False
         for option in options:
-            tentative = [*selected, item(candidate, option)]
-            key = (
-                candidate.source.provenance.section_id,
-                candidate.source.provenance.start_offset,
-                candidate.source.provenance.end_offset,
-            )
+            candidate_item = item(candidate, option)
+            tentative = [*selected, candidate_item]
+            key = _candidate_range_key(candidate)
             tentative_keys = selected_keys | {key}
+            tentative_by_key = {**selected_by_key, key: candidate_item}
             omitted = [omission_label(value) for value in all_keys if value not in tentative_keys]
             conflicts = _possible_conflicts(tentative)
+            status, category_coverage, required_omissions = _coverage_state(
+                ordered,
+                tentative_by_key,
+                unresolved_required,
+                ambiguities,
+                conflicts,
+            )
             pack = _pack(
                 task=task,
-                budget=token_budget,
+                requested_budget=token_budget,
+                budget=working_budget,
+                budget_expanded=working_budget > token_budget,
                 counter=token_counter,
                 items=tentative,
+                completeness_status=status,
+                category_coverage=category_coverage,
+                omitted_required=required_omissions,
+                ambiguous=ambiguities,
                 omitted=omitted,
                 conflicts=conflicts,
                 generation=generation,
@@ -638,9 +951,47 @@ def build_context_pack(
                     "selected_count": len(tentative),
                 },
             )
-            if pack.serialized_estimated_tokens <= token_budget:
+            next_budget = working_budget
+            if (
+                pack.serialized_estimated_tokens > working_budget
+                and candidate.required
+                and allow_required_budget_expansion
+            ):
+                next_budget = pack.serialized_estimated_tokens
+                for _ in range(4):
+                    if next_budget > engine.config.limits.max_token_budget:
+                        break
+                    pack = _pack(
+                        task=task,
+                        requested_budget=token_budget,
+                        budget=next_budget,
+                        budget_expanded=True,
+                        counter=token_counter,
+                        items=tentative,
+                        completeness_status=status,
+                        category_coverage=category_coverage,
+                        omitted_required=required_omissions,
+                        ambiguous=ambiguities,
+                        omitted=omitted,
+                        conflicts=conflicts,
+                        generation=generation,
+                        retrieval_metadata={
+                            **retrieval_metadata,
+                            "candidate_count": len(ordered),
+                            "selected_count": len(tentative),
+                        },
+                    )
+                    if pack.serialized_estimated_tokens <= next_budget:
+                        break
+                    next_budget = pack.serialized_estimated_tokens
+            if (
+                pack.serialized_estimated_tokens <= next_budget
+                and next_budget <= engine.config.limits.max_token_budget
+            ):
                 selected = tentative
+                selected_by_key = tentative_by_key
                 selected_keys = tentative_keys
+                working_budget = next_budget
                 accepted = True
                 break
         if candidate.primary and not accepted:
@@ -653,11 +1004,24 @@ def build_context_pack(
 
     omitted = [omission_label(value) for value in all_keys if value not in selected_keys]
     conflicts = _possible_conflicts(selected)
+    status, category_coverage, required_omissions = _coverage_state(
+        ordered,
+        selected_by_key,
+        unresolved_required,
+        ambiguities,
+        conflicts,
+    )
     result = _pack(
         task=task,
-        budget=token_budget,
+        requested_budget=token_budget,
+        budget=working_budget,
+        budget_expanded=working_budget > token_budget,
         counter=token_counter,
         items=selected,
+        completeness_status=status,
+        category_coverage=category_coverage,
+        omitted_required=required_omissions,
+        ambiguous=ambiguities,
         omitted=omitted,
         conflicts=conflicts,
         generation=generation,
@@ -669,7 +1033,7 @@ def build_context_pack(
             or primary_section_ids <= {item.source.provenance.section_id for item in selected},
         },
     )
-    if result.serialized_estimated_tokens > token_budget:
+    if result.serialized_estimated_tokens > working_budget:
         raise RuntimeError("internal error: serialized context pack exceeds promised budget")
     if engine.store.index_generation() != generation or any(
         item.index_generation != generation for item in result.items

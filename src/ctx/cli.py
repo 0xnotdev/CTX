@@ -421,6 +421,9 @@ def pack(
     root: Annotated[Path, typer.Option()] = Path("."),
     no_embeddings: Annotated[bool, typer.Option()] = False,
     model_dir: Annotated[Path | None, typer.Option()] = None,
+    allow_required_budget_expansion: Annotated[
+        bool, typer.Option("--allow-required-budget-expansion")
+    ] = False,
     json_output: Annotated[bool, typer.Option("--json")] = False,
 ) -> None:
     try:
@@ -428,7 +431,15 @@ def pack(
             document, authority_floor, authority, exclude_document, heading_prefix, scope
         )
         with _engine(root, no_embeddings=no_embeddings, model_dir=model_dir) as engine:
-            _emit(engine.get_context_pack(task, token_budget, **filters), json_output)
+            _emit(
+                engine.get_context_pack(
+                    task,
+                    token_budget,
+                    allow_required_budget_expansion=allow_required_budget_expansion,
+                    **filters,
+                ),
+                json_output,
+            )
     except (ConfigError, OSError, RuntimeError, ValueError, KeyError) as error:
         _fail(error, json_output=json_output)
 
@@ -455,13 +466,19 @@ def checkpoint_context(
     root: Annotated[Path, typer.Option()] = Path("."),
     no_embeddings: Annotated[bool, typer.Option()] = False,
     model_dir: Annotated[Path | None, typer.Option()] = None,
+    allow_required_budget_expansion: Annotated[
+        bool, typer.Option("--allow-required-budget-expansion")
+    ] = False,
     json_output: Annotated[bool, typer.Option("--json")] = False,
 ) -> None:
     try:
         with _engine(root, no_embeddings=no_embeddings, model_dir=model_dir) as engine:
             _emit(
                 engine.get_checkpoint_context(
-                    checkpoint_id, document=document, token_budget=budget
+                    checkpoint_id,
+                    document=document,
+                    token_budget=budget,
+                    allow_required_budget_expansion=allow_required_budget_expansion,
                 ),
                 json_output,
             )
