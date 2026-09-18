@@ -1,4 +1,5 @@
 import asyncio
+import os
 import sys
 from pathlib import Path
 
@@ -7,10 +8,12 @@ from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
 from ctx.config import (
+    ConfigError,
     LimitsConfig,
     add_document_config,
     initialize_workspace,
     load_config,
+    read_source,
     save_config,
 )
 from ctx.models import Authority
@@ -93,8 +96,31 @@ def test_mcp_input_and_response_limits_are_enforced(tmp_path: Path) -> None:
                 oversized_response = await session.call_tool(
                     "get_section", {"section_id": section_id}
                 )
-                assert oversized_response.isError
+                assert oversized_response.is_error
                 oversized_query = await session.call_tool("search", {"query": "q" * 4_097})
-                assert oversized_query.isError
+                assert oversized_query.is_error
 
     asyncio.run(exercise())
+
+
+def test_source_growth_after_open_is_rechecked(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    initialize_workspace(tmp_path)
+    source = tmp_path / "growing.md"
+    source.write_text("small", encoding="utf-8")
+    config = add_document_config(tmp_path, "growing.md", Authority.NORMATIVE)
+    limits = LimitsConfig(max_file_bytes=10)
+    original_read = os.read
+    changed = False
+
+    def growing_read(descriptor: int, amount: int) -> bytes:
+        nonlocal changed
+        if not changed:
+            changed = True
+            source.write_text("x" * 20, encoding="utf-8")
+        return original_read(descriptor, amount)
+
+    monkeypatch.setattr(os, "read", growing_read)
+    with pytest.raises(ConfigError, match="exceeds max_file_bytes after read"):
+        read_source(tmp_path, config.documents[0], limits)

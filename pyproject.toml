@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "ctx-context"
-version = "0.1.0"
+version = "1.0.0"
 description = "Local, provenance-first context infrastructure for Markdown knowledge bases"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -12,8 +12,9 @@ license = { file = "LICENSE" }
 authors = [{ name = "ctx contributors" }]
 dependencies = [
   "markdown-it-py>=4.0,<5",
-  "mcp>=1.20,<2",
+  "mcp>=2.2,<3",
   "numpy>=2.2,<3",
+  "platformdirs>=4.4,<5",
   "pydantic>=2.11,<3",
   "rich>=14,<15",
   "typer>=0.16,<1",
@@ -21,7 +22,9 @@ dependencies = [
 
 [project.optional-dependencies]
 embeddings = ["fastembed>=0.7,<1"]
-mcp = []
+all = ["ctx-context[embeddings]"]
+
+[dependency-groups]
 dev = [
   "build>=1.2,<2",
   "mypy>=1.15,<2",
@@ -29,7 +32,6 @@ dev = [
   "pytest-cov>=6,<8",
   "ruff>=0.11,<1",
 ]
-all = ["ctx-context[embeddings,mcp]"]
 
 [project.scripts]
 ctx = "ctx.cli:app"
@@ -40,6 +42,7 @@ packages = ["src/ctx"]
 [tool.pytest.ini_options]
 addopts = "-q"
 testpaths = ["tests"]
+markers = ["production_embedding: requires an explicitly installed verified BGE model"]
 
 [tool.ruff]
 target-version = "py312"
@@ -52,6 +55,10 @@ select = ["E", "F", "I", "UP", "B", "SIM"]
 python_version = "3.12"
 strict = true
 packages = ["ctx"]
+
+[[tool.mypy.overrides]]
+module = ["fastembed", "fastembed.*"]
+ignore_missing_imports = true
 
 [tool.coverage.run]
 source = ["ctx"]

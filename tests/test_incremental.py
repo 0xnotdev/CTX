@@ -7,6 +7,7 @@ from ctx.config import (
     initialize_workspace,
     remove_document_config,
 )
+from ctx.embeddings import HashEmbedding
 from ctx.models import Authority
 from ctx.service import ContextEngine, StaleIndexError
 
@@ -20,21 +21,13 @@ def workspace(tmp_path: Path) -> Path:
 
 def test_unchanged_does_zero_work_and_one_change_is_incremental(tmp_path: Path) -> None:
     root = workspace(tmp_path)
-    with ContextEngine(root) as engine:
+    backend = HashEmbedding(16)
+    with ContextEngine(root, embedder=backend) as engine:
         first = engine.index_workspace()
         assert first.documents_added == 1
         assert first.sections_added == 2
         version = first.index_version
         section_ids = engine.store.section_ids()
-        chunk_rows = engine.store.connection.execute(
-            "SELECT id, sha256 FROM chunks ORDER BY section_id"
-        ).fetchall()
-        with engine.store.connection:
-            engine.store.connection.executemany(
-                "INSERT INTO embeddings(chunk_id, model, dimensions, vector, chunk_sha256) "
-                "VALUES(?, 'fixture', 1, ?, ?)",
-                ((row["id"], b"0", row["sha256"]) for row in chunk_rows),
-            )
 
         unchanged = engine.sync_workspace()
         assert unchanged.documents_unchanged == 1
@@ -49,7 +42,7 @@ def test_unchanged_does_zero_work_and_one_change_is_incremental(tmp_path: Path) 
         assert changed.embeddings_retained == 1
         assert engine.store.section_ids() == section_ids
         embeddings = engine.store.connection.execute("SELECT COUNT(*) FROM embeddings").fetchone()
-        assert embeddings[0] == 1
+        assert embeddings[0] == 2
 
 
 def test_section_deletion_and_deterministic_rename(tmp_path: Path) -> None:

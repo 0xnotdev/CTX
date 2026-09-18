@@ -39,7 +39,12 @@ Acceptance: run `pytest tests/test_trials.py`. Verify: `ctx status`.
         assert pack.estimated_tokens <= pack.token_budget
         assert all(item.source.provenance.document_sha256 for item in pack.items)
         assert all(item.range_sha256 for item in pack.items)
-        assert pack.token_count_method == "utf8_bytes_div4_ceiling"
+        assert pack.token_count_method == "ctx/generic-utf8-div3:1"
+        assert pack.serialized_estimated_tokens <= pack.token_budget
+        assert (
+            pack.content_tokens + pack.metadata_tokens + pack.budget_safety_margin
+            >= pack.estimated_tokens
+        )
 
 
 def test_pack_truncation_uses_ast_safe_ranges_and_reports_omissions(tmp_path: Path) -> None:
@@ -53,8 +58,8 @@ def test_pack_truncation_uses_ast_safe_ranges_and_reports_omissions(tmp_path: Pa
     add_document_config(tmp_path, "large.md", Authority.NORMATIVE)
     with ContextEngine(tmp_path) as engine:
         engine.index_workspace()
-        pack = engine.get_context_pack("CP-14 Table", 350)
-        assert pack.estimated_tokens <= 350
+        pack = engine.get_context_pack("CP-14 Table", 800)
+        assert pack.estimated_tokens <= 800
         assert pack.items
         direct = pack.items[0]
         assert direct.source.text.startswith("# CP-14")
@@ -85,7 +90,8 @@ def test_possible_conflict_is_conservative_and_source_labeled(tmp_path: Path) ->
         conflict = pack.possible_conflicts[0]
         assert conflict.label == "POSSIBLE_CONFLICT"
         assert conflict.identifier == "NetworkPolicy"
-        assert {item.provenance.authority for item in conflict.sources} == {
+        assert {item.authority for item in conflict.sources} == {
             Authority.NORMATIVE,
             Authority.HISTORICAL,
         }
+        assert all(not hasattr(item, "text") for item in conflict.sources)

@@ -1,18 +1,24 @@
-"""Typed domain models shared by all ctx adapters and services."""
+"""Strict domain models shared by the CLI, MCP adapter, and durable store.
+
+Source-bearing types deliberately distinguish complete sections from exact excerpts.  Derived
+chunks, rankings, graph records, and metadata are navigation aids and never replace source.
+"""
 
 from __future__ import annotations
 
 from enum import IntEnum, StrEnum
+from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+
+class StrictModel(BaseModel):
+    """Default for external and durable boundaries."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
 
 class Authority(IntEnum):
-    """Source authority; larger values rank higher.
-
-    GENERATED is intentionally lowest so generated navigation material cannot outrank source.
-    """
-
     GENERATED = 0
     INFORMAL = 1
     HISTORICAL = 2
@@ -29,22 +35,65 @@ class EdgeType(StrEnum):
     RELATED_SECTION = "RELATED_SECTION"
 
 
-class SourceRange(BaseModel):
-    """An exact, inclusive, one-based range from an authoritative source file."""
+class ResolutionStatus(StrEnum):
+    RESOLVED = "RESOLVED"
+    UNRESOLVED = "UNRESOLVED"
+    AMBIGUOUS = "AMBIGUOUS"
 
-    model_config = ConfigDict(frozen=True)
 
+class ReferenceOrigin(StrEnum):
+    PROSE = "PROSE"
+    HEADING = "HEADING"
+    CODE = "CODE"
+    INLINE_CODE = "INLINE_CODE"
+    LINK = "LINK"
+    CHECKPOINT_FIELD = "CHECKPOINT_FIELD"
+
+
+class StatusCategory(StrEnum):
+    CLEAN = "CLEAN"
+    SOURCE_STALE = "SOURCE_STALE"
+    METADATA_STALE = "METADATA_STALE"
+    PARSER_STALE = "PARSER_STALE"
+    EMBEDDINGS_STALE = "EMBEDDINGS_STALE"
+    GRAPH_STALE = "GRAPH_STALE"
+    SCHEMA_STALE = "SCHEMA_STALE"
+    MISSING_SOURCE = "MISSING_SOURCE"
+
+
+class BudgetMethod(StrEnum):
+    STRICT_BYTE_UPPER_BOUND = "STRICT_BYTE_UPPER_BOUND"
+    APPROXIMATE_GENERIC = "APPROXIMATE_GENERIC"
+    MODEL_SPECIFIC = "MODEL_SPECIFIC"
+
+
+class SourceRange(StrictModel):
+    """Unambiguous exact contiguous source range.
+
+    Lines are inclusive and one-based. Columns are zero-based Unicode code-point offsets on the
+    boundary lines. Absolute offsets are Unicode code-point offsets in the complete document.
+    """
+
+    schema_version: Literal[1] = 1
     start_line: int = Field(ge=1)
     end_line: int = Field(ge=1)
-    text: str
+    start_column: int = Field(default=0, ge=0)
+    end_column: int | None = Field(default=None, ge=0)
+    start_offset: int = Field(default=0, ge=0)
+    end_offset: int = Field(default=0, ge=0)
     sha256: str
 
+    @model_validator(mode="after")
+    def valid_range(self) -> SourceRange:
+        if self.end_line < self.start_line or self.end_offset < self.start_offset:
+            raise ValueError("source range ends before it starts")
+        return self
 
-class Section(BaseModel):
-    """Authoritative structural unit represented by exact source text."""
 
-    model_config = ConfigDict(frozen=True)
+class Section(StrictModel):
+    """Complete authoritative Markdown section."""
 
+    schema_version: Literal[2] = 2
     id: str
     document_key: str
     ordinal: int = Field(ge=0)
@@ -54,29 +103,47 @@ class Section(BaseModel):
     parent_id: str | None
     start_line: int = Field(ge=1)
     end_line: int = Field(ge=1)
+    start_offset: int = Field(default=0, ge=0)
+    end_offset: int = Field(default=0, ge=0)
     text: str
     sha256: str
 
 
-class Chunk(BaseModel):
-    """Search-only text derived from one complete authoritative section."""
+class SearchChunk(StrictModel):
+    """Bounded search unit retaining exact source separately from embedding text."""
 
-    model_config = ConfigDict(frozen=True)
-
+    schema_version: Literal[2] = 2
     id: str
     section_id: str
     ordinal: int = Field(ge=0)
     start_line: int = Field(ge=1)
     end_line: int = Field(ge=1)
-    text: str
-    sha256: str
+    start_column: int = Field(default=0, ge=0)
+    end_column: int | None = Field(default=None, ge=0)
+    start_offset: int = Field(default=0, ge=0)
+    end_offset: int = Field(default=0, ge=0)
+    source_text: str
+    source_sha256: str
+    embedding_text: str
+    embedding_sha256: str
+    chunker_version: str
+    token_estimate: int = Field(ge=0)
+
+    # V0 compatibility for internal callers. New durable/API fields remain explicit.
+    @property
+    def text(self) -> str:
+        return self.source_text
+
+    @property
+    def sha256(self) -> str:
+        return self.source_sha256
 
 
-class DocumentRecord(BaseModel):
-    """Configured source document stored in the index."""
+Chunk = SearchChunk
 
-    model_config = ConfigDict(frozen=True)
 
+class DocumentRecord(StrictModel):
+    schema_version: Literal[2] = 2
     id: str
     path: str
     authority: Authority
@@ -85,11 +152,10 @@ class DocumentRecord(BaseModel):
     indexed_at: str | None = None
 
 
-class Provenance(BaseModel):
-    """Required provenance accompanying every source-bearing response."""
+class Provenance(StrictModel):
+    """Provenance for a full section or an exact returned subset."""
 
-    model_config = ConfigDict(frozen=True)
-
+    schema_version: Literal[2] = 2
     document_id: str
     document_path: str
     document_sha256: str
@@ -97,17 +163,121 @@ class Provenance(BaseModel):
     priority: int
     section_id: str
     heading_path: tuple[str, ...]
+    section_start_line: int
+    section_end_line: int
+    start_line: int
+    end_line: int
+    start_column: int = 0
+    end_column: int | None = None
+    start_offset: int = 0
+    end_offset: int = 0
+    section_sha256: str
+    range_sha256: str
+    index_generation: int
+
+    @property
+    def index_version(self) -> int:
+        """Compatibility name retained for V0 callers."""
+        return self.index_generation
+
+
+class SourceRef(StrictModel):
+    """Compact source identity; intentionally contains no source text."""
+
+    schema_version: Literal[1] = 1
+    document_id: str
+    document_path: str
+    section_id: str
+    heading_path: tuple[str, ...]
+    start_line: int
+    end_line: int
+    start_column: int = 0
+    end_column: int | None = None
+    section_sha256: str
+    range_sha256: str
+    authority: Authority
+    priority: int
+    index_generation: int
+
+
+class SourceItem(StrictModel):
+    """Exact authoritative source; use ``source_type`` to distinguish extent."""
+
+    schema_version: Literal[2] = 2
+    source_type: Literal["section", "excerpt"] = "section"
+    text: str
+    provenance: Provenance
+    score: float | None = None
+    reason: str | None = None
+
+    @property
+    def ref(self) -> SourceRef:
+        p = self.provenance
+        return SourceRef(
+            document_id=p.document_id,
+            document_path=p.document_path,
+            section_id=p.section_id,
+            heading_path=p.heading_path,
+            start_line=p.start_line,
+            end_line=p.end_line,
+            start_column=p.start_column,
+            end_column=p.end_column,
+            section_sha256=p.section_sha256,
+            range_sha256=p.range_sha256,
+            authority=p.authority,
+            priority=p.priority,
+            index_generation=p.index_generation,
+        )
+
+
+class SourceSection(SourceItem):
+    source_type: Literal["section"] = "section"
+
+
+class SourceExcerpt(SourceItem):
+    source_type: Literal["excerpt"] = "excerpt"
+
+
+class OutlineEntry(StrictModel):
+    schema_version: Literal[1] = 1
+    section_id: str
+    heading: str
+    heading_path: tuple[str, ...]
+    level: int
+    ordinal: int
     start_line: int
     end_line: int
     section_sha256: str
-    index_version: int
+    document_id: str
+    document_path: str
+    document_sha256: str
+    authority: Authority
+    priority: int
+    index_generation: int
+
+    @property
+    def provenance(self) -> Provenance:
+        """V0 compatibility without loading section text from SQLite."""
+        return Provenance(
+            document_id=self.document_id,
+            document_path=self.document_path,
+            document_sha256=self.document_sha256,
+            authority=self.authority,
+            priority=self.priority,
+            section_id=self.section_id,
+            heading_path=self.heading_path,
+            section_start_line=self.start_line,
+            section_end_line=self.end_line,
+            start_line=self.start_line,
+            end_line=self.end_line,
+            section_sha256=self.section_sha256,
+            range_sha256=self.section_sha256,
+            index_generation=self.index_generation,
+        )
 
 
-class SyncStats(BaseModel):
-    """Observable work performed by an index/sync operation."""
-
-    model_config = ConfigDict(frozen=True)
-
+class SyncStats(StrictModel):
+    schema_version: Literal[2] = 2
     documents_added: int = 0
     documents_changed: int = 0
     documents_unchanged: int = 0
@@ -123,113 +293,152 @@ class SyncStats(BaseModel):
     chunks_removed: int = 0
     embeddings_retained: int = 0
     embeddings_created: int = 0
-    index_version: int = 0
+    index_generation: int = 0
+
+    @property
+    def index_version(self) -> int:
+        return self.index_generation
 
 
-class IndexStatus(BaseModel):
-    model_config = ConfigDict(frozen=True)
+class StatusReason(StrictModel):
+    category: StatusCategory
+    path: str | None = None
+    reason: str
 
-    index_version: int
+
+class IndexStatus(StrictModel):
+    schema_version: Literal[2] = 2
+    index_generation: int
     configured_documents: int
     indexed_documents: int
-    stale_documents: tuple[str, ...]
-    missing_documents: tuple[str, ...]
+    category: StatusCategory
+    reasons: tuple[StatusReason, ...] = ()
+    stale_documents: tuple[str, ...] = ()
+    missing_documents: tuple[str, ...] = ()
+    schema_version_db: int
     parser_version: str
-    embedding_model: str
+    chunker_version: str
+    graph_version: str
+    checkpoint_version: str
+    retrieval_version: str
+    embedding_identity: str
+    active_channels: tuple[str, ...]
+
+    @property
+    def index_version(self) -> int:
+        return self.index_generation
+
+    @property
+    def embedding_model(self) -> str:
+        return self.embedding_identity
 
 
-class SourceItem(BaseModel):
-    """Exact source section plus complete provenance."""
-
-    model_config = ConfigDict(frozen=True)
-
-    text: str
-    provenance: Provenance
-    score: float | None = None
-    reason: str | None = None
+class FilterSet(StrictModel):
+    documents: frozenset[str] | None = None
+    authority_floor: Authority | None = None
+    authorities: frozenset[Authority] | None = None
+    exclude_documents: frozenset[str] = frozenset()
+    heading_prefix: tuple[str, ...] | None = None
+    scope: str | None = None
 
 
-class ContextPackItem(BaseModel):
-    model_config = ConfigDict(frozen=True)
-
+class ContextPackItem(StrictModel):
+    schema_version: Literal[2] = 2
     source: SourceItem
     reason: str
     category: str
+    relevance: float
+    confidence: float = Field(ge=0, le=1)
     estimated_tokens: int
+    section_sha256: str
     range_sha256: str
+    index_generation: int
 
 
-class PossibleConflict(BaseModel):
-    model_config = ConfigDict(frozen=True)
-
-    label: str = "POSSIBLE_CONFLICT"
+class PossibleConflict(StrictModel):
+    schema_version: Literal[2] = 2
+    label: Literal["POSSIBLE_CONFLICT"] = "POSSIBLE_CONFLICT"
     identifier: str
     reason: str
-    sources: tuple[SourceItem, SourceItem]
+    sources: tuple[SourceRef, SourceRef]
 
 
-class ContextPack(BaseModel):
-    model_config = ConfigDict(frozen=True)
-
+class ContextPack(StrictModel):
+    schema_version: Literal[2] = 2
     task: str
     token_budget: int
+    budget_method: BudgetMethod
+    budget_counter_identity: str
+    budget_safety_margin: int
+    content_tokens: int
+    metadata_tokens: int
+    serialized_estimated_tokens: int
     estimated_tokens: int
     token_count_method: str
     items: tuple[ContextPackItem, ...]
     omitted_relevant_sections: tuple[str, ...]
     possible_conflicts: tuple[PossibleConflict, ...] = ()
-    index_version: int
-    retrieval_metadata: dict[str, str | int | bool]
+    index_generation: int
+    retrieval_metadata: dict[str, str | int | bool | list[str]]
+
+    @property
+    def index_version(self) -> int:
+        return self.index_generation
 
 
-class ReferenceRecord(BaseModel):
-    model_config = ConfigDict(frozen=True)
-
+class ReferenceRecord(StrictModel):
+    schema_version: Literal[2] = 2
     source_section_id: str
     target_section_id: str | None
+    candidate_target_ids: tuple[str, ...] = ()
     edge_type: EdgeType
     label: str
-    resolved: bool
+    status: ResolutionStatus
+    reason: str
+    evidence: str
+    origin: ReferenceOrigin
+
+    @property
+    def resolved(self) -> bool:
+        return self.status is ResolutionStatus.RESOLVED
 
 
-class ReferenceResult(BaseModel):
-    """Traversable graph edge with exact source/target where available."""
-
-    model_config = ConfigDict(frozen=True)
-
+class ReferenceResult(StrictModel):
+    schema_version: Literal[2] = 2
     edge: ReferenceRecord
     source: SourceItem
     target: SourceItem | None
+    candidates: tuple[SourceRef, ...] = ()
 
 
-class SymbolResult(BaseModel):
-    model_config = ConfigDict(frozen=True)
-
+class SymbolResult(StrictModel):
+    schema_version: Literal[2] = 2
     symbol: str
     kind: str
+    confidence: float = Field(default=1.0, ge=0, le=1)
+    origin: ReferenceOrigin = ReferenceOrigin.PROSE
     source: SourceItem
 
 
-class SearchHit(BaseModel):
-    """Ranked authoritative section returned by one or more retrieval channels."""
-
-    model_config = ConfigDict(frozen=True)
-
+class SearchHit(StrictModel):
+    schema_version: Literal[2] = 2
     source: SourceItem
     score: float
     channels: tuple[str, ...]
     matched_terms: tuple[str, ...] = ()
+    chunk_id: str | None = None
+    match_start_line: int | None = None
+    match_end_line: int | None = None
+    index_generation: int
 
 
-class ParsedDocument(BaseModel):
-    """Deterministic structural parse of a Markdown source."""
-
-    model_config = ConfigDict(frozen=True)
-
+class ParsedDocument(StrictModel):
+    schema_version: Literal[2] = 2
     document_key: str
     source_text: str
     sha256: str
     front_matter: str | None
     sections: tuple[Section, ...]
-    chunks: tuple[Chunk, ...]
+    chunks: tuple[SearchChunk, ...]
     parser_version: str
+    chunker_version: str

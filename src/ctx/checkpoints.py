@@ -1,4 +1,4 @@
-"""Checkpoint recognition and structured navigation metadata."""
+"""Document-aware checkpoint recognition and exact-source context models."""
 
 from __future__ import annotations
 
@@ -8,13 +8,15 @@ import re
 from pathlib import Path
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import Field
 
 from ctx.graph import GraphSection
-from ctx.models import Authority, ContextPack, ReferenceResult, SourceItem
+from ctx.models import Authority, ContextPack, ReferenceResult, SourceItem, StrictModel
 
+CHECKPOINT_VERSION = "ctx-checkpoints:2"
 _CHECKPOINT = re.compile(r"^\s*(CP-\d+)\s*(?:[—–-]\s*)?(.*)$", re.IGNORECASE)
 _FIELD_LINE = re.compile(r"^\s*(?:[-*]\s*)?(?:\*\*)?([A-Za-z][A-Za-z /_-]+?)(?:\*\*)?\s*:\s*(.*)$")
+_LIST_LINE = re.compile(r"^\s*(?:[-*+]\s+|\d+[.)]\s+)(.*)$")
 
 _FIELD_NAMES = {
     "goal": "goal",
@@ -36,12 +38,13 @@ _FIELD_NAMES = {
     "out of scope": "out_of_scope",
     "artifacts": "artifacts",
     "verify": "verify",
+    "security": "security",
+    "security constraints": "security",
 }
 
 
-class GeneratedArtifact(BaseModel):
-    model_config = ConfigDict(frozen=True)
-
+class GeneratedArtifact(StrictModel):
+    schema_version: int = 1
     path: str
     authority: Authority = Authority.GENERATED
     sha256: str
@@ -49,9 +52,9 @@ class GeneratedArtifact(BaseModel):
     navigation_only: bool = True
 
 
-class CheckpointMetadata(BaseModel):
-    model_config = ConfigDict(frozen=True)
-
+class CheckpointMetadata(StrictModel):
+    schema_version: int = 2
+    document_id: str
     checkpoint_id: str
     title: str
     root_section_id: str
@@ -60,22 +63,34 @@ class CheckpointMetadata(BaseModel):
     generated_artifact: GeneratedArtifact | None = None
 
 
-class CheckpointResult(BaseModel):
-    model_config = ConfigDict(frozen=True)
-
+class CheckpointResult(StrictModel):
+    schema_version: int = 2
     metadata: CheckpointMetadata
     sources: tuple[SourceItem, ...]
 
 
-class CheckpointContext(BaseModel):
-    model_config = ConfigDict(frozen=True)
+class SecurityContextItem(StrictModel):
+    source: SourceItem
+    applicability: str = Field(pattern="^(directly_applicable|global|semantic_candidate)$")
+    reason: str
 
+
+class NamedError(StrictModel):
+    symbol: str
+    confidence: float = Field(ge=0, le=1)
+    source: str
+
+
+class CheckpointContext(StrictModel):
+    schema_version: int = 2
     checkpoint: CheckpointResult
     dependencies: tuple[ReferenceResult, ...]
     references: tuple[ReferenceResult, ...]
     interfaces_models: tuple[SourceItem, ...]
     named_errors: tuple[str, ...]
+    error_evidence: tuple[NamedError, ...] = ()
     security_rules: tuple[SourceItem, ...]
+    security_context: tuple[SecurityContextItem, ...] = ()
     acceptance_criteria: tuple[str, ...]
     verification_commands: tuple[str, ...]
     out_of_scope: tuple[str, ...]
@@ -87,18 +102,60 @@ def _canonical_field(value: str) -> str | None:
     return _FIELD_NAMES.get(normalized)
 
 
-def _body_without_heading(text: str) -> str:
-    lines = text.splitlines()
-    return "\n".join(lines[1:]).strip()
+def _clean_values(text: str) -> list[str]:
+    values: list[str] = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        match = _LIST_LINE.match(line)
+        values.append((match.group(1) if match else stripped).strip())
+    return values
+
+
+def _section_fields(section: GraphSection) -> dict[str, list[str]]:
+    result: dict[str, list[str]] = {}
+    lines = section.text.splitlines()
+    heading_field = _canonical_field(section.heading)
+    if heading_field:
+        for value in _clean_values("\n".join(lines[1:])):
+            result.setdefault(heading_field, []).append(value)
+
+    index = 1
+    while index < len(lines):
+        match = _FIELD_LINE.match(lines[index])
+        if not match:
+            index += 1
+            continue
+        key = _canonical_field(match.group(1))
+        if key is None:
+            index += 1
+            continue
+        inline = match.group(2).strip()
+        if inline:
+            result.setdefault(key, []).append(inline)
+            index += 1
+            continue
+        # An empty field value owns subsequent list/indented lines until another field or heading.
+        index += 1
+        continuation: list[str] = []
+        while index < len(lines):
+            if _FIELD_LINE.match(lines[index]) or re.match(r"^#{1,6}\s+", lines[index]):
+                break
+            if lines[index].strip():
+                continuation.append(lines[index])
+            index += 1
+        for value in _clean_values("\n".join(continuation)):
+            result.setdefault(key, []).append(value)
+    return result
 
 
 def recognize_checkpoints(
     sections: list[GraphSection],
     artifacts: dict[str, GeneratedArtifact] | None = None,
 ) -> tuple[CheckpointMetadata, ...]:
-    """Recognize checkpoint roots, descendants, and canonical fields deterministically."""
+    """Recognize checkpoint roots and fields without crossing document boundaries."""
     by_parent: dict[str, list[GraphSection]] = {}
-    by_id = {section.id: section for section in sections}
     for section in sections:
         if section.parent_id:
             by_parent.setdefault(section.parent_id, []).append(section)
@@ -109,44 +166,38 @@ def recognize_checkpoints(
         if not match:
             continue
         checkpoint_id = match.group(1).upper()
-        title = match.group(2).strip()
         descendants: list[GraphSection] = []
         queue = list(by_parent.get(root.id, []))
         while queue:
             child = queue.pop(0)
+            if child.document_id != root.document_id:
+                continue
             descendants.append(child)
             queue[0:0] = by_parent.get(child.id, [])
         members = [root, *descendants]
         fields: dict[str, list[str]] = {}
         for section in members:
-            heading_field = _canonical_field(section.heading)
-            if heading_field:
-                value = _body_without_heading(section.text)
-                if value:
-                    fields.setdefault(heading_field, []).append(value)
-            for line in section.text.splitlines()[1:]:
-                field_match = _FIELD_LINE.match(line)
-                if not field_match:
-                    continue
-                key = _canonical_field(field_match.group(1))
-                value = field_match.group(2).strip()
-                if key and value:
-                    fields.setdefault(key, []).append(value)
+            for key, values in _section_fields(section).items():
+                fields.setdefault(key, []).extend(values)
+        artifact = (artifacts or {}).get(f"{root.document_id}:{checkpoint_id}")
+        if artifact is None:
+            artifact = (artifacts or {}).get(checkpoint_id)
         records.append(
             CheckpointMetadata(
+                document_id=root.document_id,
                 checkpoint_id=checkpoint_id,
-                title=title,
+                title=match.group(2).strip(),
                 root_section_id=root.id,
-                section_ids=tuple(section.id for section in members if section.id in by_id),
+                section_ids=tuple(section.id for section in members),
                 fields={key: tuple(values) for key, values in sorted(fields.items())},
-                generated_artifact=(artifacts or {}).get(checkpoint_id),
+                generated_artifact=artifact,
             )
         )
     return tuple(records)
 
 
 def load_generated_artifacts(root: Path, max_bytes: int) -> dict[str, GeneratedArtifact]:
-    """Load bounded `.ctx/checkpoints/CP-N.json` navigation artifacts as GENERATED only."""
+    """Load bounded JSON checkpoint aids. They remain GENERATED and navigation-only."""
     directory = root / ".ctx" / "checkpoints"
     if not directory.exists():
         return {}

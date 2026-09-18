@@ -68,11 +68,15 @@ def test_identical_sections_are_distinct_and_deterministic() -> None:
     assert one.sections[0].id != one.sections[1].id
 
 
-def test_long_paragraph_is_not_split() -> None:
+def test_long_paragraph_is_split_into_bounded_exact_chunks() -> None:
     paragraph = "word " * 20_000
-    parsed = parse_markdown(f"# Long\n{paragraph}\n")
-    assert len(parsed.sections) == len(parsed.chunks) == 1
-    assert paragraph in parsed.chunks[0].text
+    source = f"# Long\n{paragraph}\n"
+    parsed = parse_markdown(source)
+    assert len(parsed.sections) == 1
+    assert len(parsed.chunks) > 100
+    assert "".join(chunk.source_text for chunk in parsed.chunks) == source
+    assert all(len(chunk.embedding_text.encode("utf-8")) <= 448 for chunk in parsed.chunks)
+    assert all(chunk.source_sha256 for chunk in parsed.chunks)
 
 
 def test_malformed_markdown_and_unclosed_fence_do_not_crash() -> None:

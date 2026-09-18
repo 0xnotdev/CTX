@@ -1,6 +1,8 @@
 .venv/
 .smoke-venv/
 .ctx/
+.ctx-test-models/
+.bench-tmp/
 __pycache__/
 *.py[cod]
 .pytest_cache/
