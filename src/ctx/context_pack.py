@@ -914,7 +914,8 @@ def build_context_pack(
         options = [source]
         excerpt = _match_excerpt(engine, source, task, filters)
         if (
-            excerpt is not None
+            not candidate.required
+            and excerpt is not None
             and excerpt.provenance.range_sha256 != source.provenance.range_sha256
         ):
             options.append(excerpt)

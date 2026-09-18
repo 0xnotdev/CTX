@@ -1,6 +1,9 @@
 from pathlib import Path
 
+import pytest
+
 from ctx.config import add_document_config, initialize_workspace
+from ctx.context_pack import PrimaryRequirementTooLarge
 from ctx.models import Authority
 from ctx.service import ContextEngine
 
@@ -58,19 +61,19 @@ def test_pack_truncation_uses_ast_safe_ranges_and_reports_omissions(tmp_path: Pa
     add_document_config(tmp_path, "large.md", Authority.NORMATIVE)
     with ContextEngine(tmp_path) as engine:
         engine.index_workspace()
-        pack = engine.get_context_pack("CP-14 Table", 1_500)
-        assert pack.estimated_tokens <= 1_500
+        with pytest.raises(PrimaryRequirementTooLarge):
+            engine.get_context_pack("CP-14 Table", 1_500)
+        pack = engine.get_context_pack("CP-14 Table", 1_500, allow_required_budget_expansion=True)
+        assert pack.budget_expanded
         assert pack.items
         direct = pack.items[0]
         assert direct.source.text.startswith("# CP-14")
-        assert direct.source.text.count("```") in {0, 2}
-        if "| h | v |" in direct.source.text:
-            assert "| a | b |" in direct.source.text
+        assert direct.source.text.count("```") == 2
+        assert direct.source.source_type == "section"
         assert (
             direct.source.provenance.end_line
-            <= engine.get_section(direct.source.provenance.section_id).provenance.end_line
+            == engine.get_section(direct.source.provenance.section_id).provenance.end_line
         )
-        assert pack.omitted_relevant_sections
 
 
 def test_possible_conflict_is_conservative_and_source_labeled(tmp_path: Path) -> None:
