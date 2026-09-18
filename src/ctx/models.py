@@ -75,13 +75,27 @@ class CompletenessStatus(StrEnum):
     NOT_APPLICABLE = "NOT_APPLICABLE"
 
 
+class ContextMode(StrEnum):
+    STANDARD = "STANDARD"
+    STRICT_AGENT = "STRICT_AGENT"
+
+
+class RetrievalMode(StrEnum):
+    HYBRID_SEMANTIC = "HYBRID_SEMANTIC"
+    LEXICAL_ONLY = "LEXICAL_ONLY"
+
+
 class CoverageCategory(StrEnum):
     PRIMARY = "primary"
     DEPENDENCIES = "dependencies"
     ARCHITECTURE = "architecture"
+    DECISIONS = "decisions"
+    CURRENT_STATE = "current_state"
     SECURITY = "security"
     ACCEPTANCE = "acceptance"
     VERIFICATION = "verification"
+    TESTING = "testing"
+    NORMATIVE = "normative"
     CHECKPOINT_DESCENDANTS = "checkpoint_descendants"
 
 
@@ -333,7 +347,7 @@ class StatusReason(StrictModel):
 
 
 class IndexStatus(StrictModel):
-    schema_version: Literal[2] = 2
+    schema_version: Literal[3] = 3
     index_generation: int
     configured_documents: int
     indexed_documents: int
@@ -348,6 +362,7 @@ class IndexStatus(StrictModel):
     checkpoint_version: str
     retrieval_version: str
     embedding_identity: str
+    retrieval_mode: RetrievalMode
     active_channels: tuple[str, ...]
 
     @property
@@ -393,6 +408,7 @@ class OmittedRequiredEvidence(StrictModel):
     schema_version: Literal[1] = 1
     category: CoverageCategory
     reason: str
+    confidence: float | None = Field(default=None, ge=0, le=1)
     document_id: str | None = None
     document_path: str | None = None
     section_id: str | None = None
@@ -423,7 +439,7 @@ class CategoryCoverage(StrictModel):
 
 
 class ContextPack(StrictModel):
-    schema_version: Literal[3] = 3
+    schema_version: Literal[4] = 4
     task: str
     requested_token_budget: int
     token_budget: int

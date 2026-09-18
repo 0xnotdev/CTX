@@ -16,6 +16,7 @@ from ctx.models import (
     BudgetMethod,
     CategoryCoverage,
     CompletenessStatus,
+    ContextMode,
     ContextPack,
     ContextPackItem,
     CoverageCategory,
@@ -25,6 +26,7 @@ from ctx.models import (
     OmittedRequiredEvidence,
     PossibleConflict,
     ResolutionStatus,
+    RetrievalMode,
     SourceItem,
 )
 from ctx.retrieval import classify_query
@@ -150,12 +152,16 @@ _CATEGORIES = {
     "explicit_dependency": 2,
     "checkpoint_field": 3,
     "interface_or_model": 4,
-    "global_constraint": 5,
-    "error_or_failure": 6,
-    "security_constraint": 7,
-    "acceptance_or_verify": 8,
-    "semantic_fallback": 9,
-    "neighbor_context": 10,
+    "decision_constraint": 5,
+    "current_state": 6,
+    "global_constraint": 7,
+    "error_or_failure": 8,
+    "security_constraint": 9,
+    "acceptance_or_verify": 10,
+    "testing_constraint": 11,
+    "normative_constraint": 12,
+    "semantic_fallback": 13,
+    "neighbor_context": 14,
 }
 
 
@@ -257,7 +263,10 @@ def _coverage_state(
         omissions.append(
             OmittedRequiredEvidence(
                 category=category,
-                reason="required evidence did not fit the context-pack budget",
+                reason=(
+                    "required evidence did not fit the context-pack budget; " + candidate.reason
+                ),
+                confidence=candidate.confidence,
                 document_id=provenance.document_id,
                 document_path=provenance.document_path,
                 section_id=provenance.section_id,
@@ -270,8 +279,30 @@ def _coverage_state(
         )
 
     conflict_hashes = {source.range_sha256 for conflict in conflicts for source in conflict.sources}
+    base_categories = (
+        CoverageCategory.PRIMARY,
+        CoverageCategory.DEPENDENCIES,
+        CoverageCategory.ARCHITECTURE,
+        CoverageCategory.SECURITY,
+        CoverageCategory.ACCEPTANCE,
+        CoverageCategory.VERIFICATION,
+        CoverageCategory.CHECKPOINT_DESCENDANTS,
+    )
+    applicable_categories = {
+        category for candidate in candidates for category in candidate.coverage_categories
+    }
+    applicable_categories.update(item.category for item in unresolved)
+    applicable_categories.update(item.category for item in ambiguous)
+    categories = (
+        *base_categories,
+        *(
+            item
+            for item in CoverageCategory
+            if item in applicable_categories and item not in base_categories
+        ),
+    )
     coverage_records: list[CategoryCoverage] = []
-    for category in CoverageCategory:
+    for category in categories:
         applicable = [
             candidate for candidate in candidates if category in candidate.coverage_categories
         ]
@@ -402,7 +433,15 @@ def _empty_coverage() -> tuple[CategoryCoverage, ...]:
             status=CoverageStatus.NOT_APPLICABLE,
             required=False,
         )
-        for category in CoverageCategory
+        for category in (
+            CoverageCategory.PRIMARY,
+            CoverageCategory.DEPENDENCIES,
+            CoverageCategory.ARCHITECTURE,
+            CoverageCategory.SECURITY,
+            CoverageCategory.ACCEPTANCE,
+            CoverageCategory.VERIFICATION,
+            CoverageCategory.CHECKPOINT_DESCENDANTS,
+        )
     )
 
 
@@ -475,6 +514,341 @@ def _match_excerpt(
     return None
 
 
+@dataclass(frozen=True)
+class _DiscoverySignal:
+    query: str
+    origins: tuple[str, ...]
+
+
+@dataclass
+class _DiscoveredSection:
+    source: SourceItem
+    category: CoverageCategory
+    candidate_category: str
+    recognized_category: bool
+    optional: bool
+    best_rank: int
+    signal_origins: set[str]
+    signal_queries: set[str]
+    channels: set[str]
+    overlap_terms: set[str]
+    semantic_score: float
+
+
+# Conservative cosine gates keep a role-named normative document from becoming required merely
+# because every vector search has a top result. Repeated independent structured signals permit a
+# slightly lower score; direct lexical/identifier overlap remains independently material.
+_SEMANTIC_MATERIAL_SCORE = 0.50
+_REPEATED_SEMANTIC_SCORE = 0.42
+_GENERIC_SEMANTIC_SCORE = 0.64
+_GENERIC_REPEATED_SCORE = 0.52
+
+_DISCOVERY_STOPWORDS = {
+    "about",
+    "after",
+    "also",
+    "before",
+    "being",
+    "criteria",
+    "during",
+    "exactly",
+    "from",
+    "goal",
+    "implement",
+    "implementation",
+    "into",
+    "must",
+    "only",
+    "required",
+    "requires",
+    "shall",
+    "should",
+    "that",
+    "their",
+    "then",
+    "this",
+    "through",
+    "using",
+    "verify",
+    "when",
+    "with",
+    "without",
+}
+
+
+def _meaningful_terms(text: str) -> set[str]:
+    return {
+        term.casefold()
+        for term in re.findall(r"[A-Za-z][A-Za-z0-9_.@/-]{3,}", text)
+        if term.casefold() not in _DISCOVERY_STOPWORDS
+    }
+
+
+def _bounded_signal(value: str) -> str:
+    compact = " ".join(value.split())
+    return compact[:512].rstrip()
+
+
+def _discovery_signals(task: str, checkpoints: Sequence[Any]) -> tuple[_DiscoverySignal, ...]:
+    rows: list[_DiscoverySignal] = []
+
+    def add(value: str, origin: str) -> None:
+        query = _bounded_signal(value)
+        if len(_meaningful_terms(query)) < 1:
+            return
+        key = query.casefold()
+        if any(item.query.casefold() == key for item in rows):
+            return
+        rows.append(_DiscoverySignal(query=query, origins=(origin,)))
+
+    add(task, "task")
+    field_order = (
+        "goal",
+        "why",
+        "exact_scope",
+        "dependencies",
+        "files_modules",
+        "interfaces_models",
+        "cli_behavior",
+        "tests_acceptance_criteria",
+        "failure_conditions",
+        "security",
+        "verify",
+    )
+    for checkpoint in checkpoints:
+        metadata = checkpoint.metadata
+        add(metadata.title, "checkpoint_title")
+        for field in field_order:
+            for value in metadata.fields.get(field, ()):
+                add(value, field)
+        for source in checkpoint.sources:
+            for line in source.text.splitlines():
+                stripped = re.sub(r"^[#>*+\-\d.()\s]+", "", line).strip(" `")
+                if re.search(
+                    r"(?i)\b(?:must|shall|required|requires|never|only|cannot|ensure|retain|"
+                    r"reject|refuse|preserve)\b",
+                    stripped,
+                ):
+                    add(stripped, "normative_requirement")
+    # The bound is deterministic and favors the structured evidence order above.
+    return tuple(rows[:16])
+
+
+def _discovery_category(
+    source: SourceItem,
+) -> tuple[CoverageCategory, str, bool, bool]:
+    provenance = source.provenance
+    path = provenance.document_path.casefold()
+    heading = " ".join(provenance.heading_path).casefold()
+    label = f"{path} {heading}"
+    optional = bool(
+        re.search(
+            r"\b(?:background|rationale|overview|history|historical|appendix|example|"
+            r"research|notes|glossary|archive)\b",
+            label,
+        )
+    )
+    categories = (
+        (
+            r"\b(?:decision|decisions|adr[-_ ]?\d*|rfc[-_ ]?\d*)\b",
+            CoverageCategory.DECISIONS,
+            "decision_constraint",
+        ),
+        (
+            r"\b(?:progress|current[-_ ]state|delivery[-_ ]state|"
+            r"implementation[-_ ]state|status)\b",
+            CoverageCategory.CURRENT_STATE,
+            "current_state",
+        ),
+        (
+            r"\b(?:architecture|architectural|design|topology|interface|model)\b",
+            CoverageCategory.ARCHITECTURE,
+            "interface_or_model",
+        ),
+        (
+            r"\b(?:security|secure|threat|trust[-_ ]boundary|vulnerability)\b",
+            CoverageCategory.SECURITY,
+            "security_constraint",
+        ),
+        (
+            r"\b(?:acceptance|acceptance[-_ ]criteria)\b",
+            CoverageCategory.ACCEPTANCE,
+            "acceptance_or_verify",
+        ),
+        (
+            r"\b(?:verification|verify|validation)\b",
+            CoverageCategory.VERIFICATION,
+            "acceptance_or_verify",
+        ),
+        (
+            r"\b(?:testing|tests?|quality|qualification|qa)\b",
+            CoverageCategory.TESTING,
+            "testing_constraint",
+        ),
+        (
+            r"\b(?:dependencies|dependency|prerequisite)\b",
+            CoverageCategory.DEPENDENCIES,
+            "explicit_dependency",
+        ),
+    )
+    for pattern, coverage, category in categories:
+        if re.search(pattern, label):
+            return coverage, category, True, optional
+    recognized = bool(
+        re.search(r"\b(?:constraint|requirement|contract|policy|rule|mandate)\b", heading)
+    )
+    return CoverageCategory.NORMATIVE, "normative_constraint", recognized, optional
+
+
+def _strict_discovery(
+    engine: ContextEngine,
+    task: str,
+    checkpoints: Sequence[Any],
+    excluded_section_ids: set[str],
+) -> tuple[_DiscoveredSection, ...]:
+    signals = _discovery_signals(task, checkpoints)
+    discovered: dict[str, _DiscoveredSection] = {}
+    source_terms: dict[str, set[str]] = {}
+    focused_limit = min(6, engine.config.limits.max_results)
+    global_limit = engine.config.limits.max_results
+    normative_documents = sorted(
+        document.path
+        for document in engine.config.documents
+        if document.authority >= Authority.NORMATIVE
+    )
+
+    def collect(
+        signal: _DiscoverySignal,
+        *,
+        limit: int,
+        documents: set[str] | None = None,
+    ) -> None:
+        signal_terms = _meaningful_terms(signal.query)
+        semantic_hits = engine.search_semantic(
+            signal.query,
+            limit=limit,
+            authority_floor=Authority.NORMATIVE,
+            documents=documents,
+            require_semantic=True,
+        )
+        semantic_scores: dict[str, float] = {}
+        for semantic_hit in semantic_hits:
+            section_id = semantic_hit.source.provenance.section_id
+            semantic_scores[section_id] = max(
+                semantic_scores.get(section_id, -1.0), semantic_hit.score
+            )
+        hits = engine.search(
+            signal.query,
+            limit=limit,
+            authority_floor=Authority.NORMATIVE,
+            documents=documents,
+            require_semantic=True,
+        )
+        ranked_hits = list(enumerate(hits, start=1))
+        hybrid_section_ids = {hit.source.provenance.section_id for hit in hits}
+        ranked_hits.extend(
+            (rank, hit)
+            for rank, hit in enumerate(semantic_hits, start=1)
+            if hit.source.provenance.section_id not in hybrid_section_ids
+        )
+        for rank, hit in ranked_hits:
+            provenance = hit.source.provenance
+            section_id = provenance.section_id
+            if section_id in excluded_section_ids:
+                continue
+            existing = discovered.get(section_id)
+            source = existing.source if existing is not None else engine.get_section(section_id)
+            terms = source_terms.get(section_id)
+            if terms is None:
+                terms = _meaningful_terms(source.text)
+                source_terms[section_id] = terms
+            overlap = signal_terms & terms
+            semantic_score = semantic_scores.get(section_id, -1.0)
+            if existing is None:
+                coverage, category, recognized, optional = _discovery_category(source)
+                discovered[section_id] = _DiscoveredSection(
+                    source=source,
+                    category=coverage,
+                    candidate_category=category,
+                    recognized_category=recognized,
+                    optional=optional,
+                    best_rank=rank,
+                    signal_origins=set(signal.origins),
+                    signal_queries={signal.query},
+                    channels=set(hit.channels),
+                    overlap_terms=set(overlap),
+                    semantic_score=semantic_score,
+                )
+            else:
+                existing.best_rank = min(existing.best_rank, rank)
+                existing.signal_origins.update(signal.origins)
+                existing.signal_queries.add(signal.query)
+                existing.channels.update(hit.channels)
+                existing.overlap_terms.update(overlap)
+                existing.semantic_score = max(existing.semantic_score, semantic_score)
+
+    # Four deterministic global query groups retain every structured signal without multiplying
+    # search cost by every document. One compact per-document probe ensures a large high-scoring
+    # document cannot hide another configured normative document behind the global cutoff.
+    grouped_signals: list[_DiscoverySignal] = []
+    for start in range(0, len(signals), 4):
+        group = signals[start : start + 4]
+        grouped_signals.append(
+            _DiscoverySignal(
+                query=_bounded_signal(" ".join(item.query for item in group)),
+                origins=tuple(origin for item in group for origin in item.origins),
+            )
+        )
+    for signal in grouped_signals:
+        collect(signal, limit=global_limit)
+    focused_signal = _DiscoverySignal(
+        query=_bounded_signal(" ".join(item.query[:28] for item in signals)),
+        origins=tuple(origin for item in signals for origin in item.origins),
+    )
+    for document_path in normative_documents:
+        if focused_signal.query:
+            collect(focused_signal, limit=focused_limit, documents={document_path})
+
+    material: list[_DiscoveredSection] = []
+    for value in discovered.values():
+        structurally_related = bool(value.overlap_terms)
+        semantic_material = value.semantic_score >= _SEMANTIC_MATERIAL_SCORE
+        repeated_semantic = (
+            value.semantic_score >= _REPEATED_SEMANTIC_SCORE and len(value.signal_queries) >= 2
+        )
+        if value.optional:
+            if semantic_material or structurally_related:
+                material.append(value)
+            continue
+        if value.recognized_category and (
+            semantic_material or repeated_semantic or structurally_related
+        ):
+            material.append(value)
+            continue
+        if (
+            len(value.overlap_terms) >= 2
+            or value.semantic_score >= _GENERIC_SEMANTIC_SCORE
+            or (value.semantic_score >= _GENERIC_REPEATED_SCORE and len(value.signal_queries) >= 2)
+        ):
+            material.append(value)
+
+    # Retrieval is bounded per signal/document. Every item that passes deterministic materiality
+    # classification is required; only explicitly optional categories may be dropped harmlessly.
+    material.sort(
+        key=lambda item: (
+            item.optional,
+            list(CoverageCategory).index(item.category),
+            -len(item.signal_queries),
+            item.best_rank,
+            -len(item.overlap_terms),
+            item.source.provenance.document_path,
+            item.source.provenance.start_line,
+            item.source.provenance.section_id,
+        )
+    )
+    return tuple(material)
+
+
 def build_context_pack(
     engine: ContextEngine,
     task: str,
@@ -483,6 +857,8 @@ def build_context_pack(
     filters: FilterSet | None = None,
     counter: TokenCounter | None = None,
     allow_required_budget_expansion: bool = False,
+    strict_agent: bool = False,
+    require_semantic: bool = False,
     checkpoint_document: str | None = None,
 ) -> ContextPack:
     if token_budget < 1:
@@ -491,17 +867,36 @@ def build_context_pack(
         raise ValueError("token_budget exceeds configured maximum")
     token_counter = counter or ApproximateGenericCounter()
     filters = filters or FilterSet()
+    if strict_agent and not require_semantic:
+        require_semantic = True
+    semantic_active = False
+    if engine.embedder is not None:
+        try:
+            engine.require_semantic_ready()
+            semantic_active = True
+        except RuntimeError:
+            if require_semantic:
+                raise
+    elif require_semantic:
+        engine.require_semantic_ready()
     generation = engine.store.index_generation()
     classification = classify_query(task)
+    context_mode = ContextMode.STRICT_AGENT if strict_agent else ContextMode.STANDARD
+    retrieval_mode = (
+        RetrievalMode.HYBRID_SEMANTIC if semantic_active else RetrievalMode.LEXICAL_ONLY
+    )
+    active_channels = (
+        ["structural", "lexical", "semantic"] if semantic_active else ["structural", "lexical"]
+    )
     retrieval_metadata: dict[str, str | int | bool | list[str]] = {
-        "strategy": "evidence-first+graph+staged-authority+match-centered",
-        "active_channels": list(engine.active_channels),
-        "has_structural_query": bool(classification.structural_terms),
-        "filtering": "pre-cutoff",
+        "strategy": "evidence-first+graph+hybrid",
+        "context_mode": context_mode.value,
+        "retrieval_mode": retrieval_mode.value,
+        "require_semantic": require_semantic,
+        "active_channels": active_channels,
         "candidate_count": 0,
         "selected_count": 0,
         "primary_retained": True,
-        "required_budget_expansion_allowed": allow_required_budget_expansion,
     }
     minimum, base_metadata = _minimum_base(
         task=task,
@@ -603,11 +998,13 @@ def build_context_pack(
     filter_kwargs = _filter_kwargs(filters)
     primary_ids = classification.checkpoint_ids
     primary_section_ids: set[str] = set()
+    checkpoint_results: list[Any] = []
     for checkpoint_id in primary_ids:
         document_filter = checkpoint_document
         if document_filter is None and filters.documents and len(filters.documents) == 1:
             document_filter = next(iter(filters.documents))
         checkpoint = engine.get_checkpoint(checkpoint_id, document=document_filter)
+        checkpoint_results.append(checkpoint)
         root = checkpoint.sources[0]
         primary_section_ids.add(root.provenance.section_id)
         add(
@@ -656,13 +1053,32 @@ def build_context_pack(
                 checkpoint_id=checkpoint_id.upper(),
             )
 
-    direct = engine.search(task, limit=min(12, engine.config.limits.max_results), **filter_kwargs)
+    direct = engine.search(
+        task,
+        limit=min(12, engine.config.limits.max_results),
+        require_semantic=require_semantic,
+        _semantic_enabled=semantic_active,
+        **filter_kwargs,
+    )
     uncovered_terms = {
         term.casefold()
         for term in re.findall(r"[\w.@/:-]+", task, flags=re.UNICODE)
         if len(term) > 2 and term.casefold() not in {"implement", "using", "with", "from"}
     }
+    checkpoint_source_ids = {
+        source.provenance.section_id
+        for checkpoint in checkpoint_results
+        for source in checkpoint.sources
+    }
     for rank, hit in enumerate(direct, start=1):
+        if (
+            strict_agent
+            and primary_ids
+            and hit.source.provenance.section_id not in checkpoint_source_ids
+        ):
+            # Strict cross-document evidence is admitted only after deterministic materiality
+            # classification below; raw hybrid neighbors cannot masquerade as required context.
+            continue
         source_folded = hit.source.text.casefold()
         covered_terms = {term for term in uncovered_terms if term in source_folded}
         direct_required = bool(not primary_ids and (rank == 1 or covered_terms))
@@ -838,6 +1254,68 @@ def build_context_pack(
                         checkpoint_id=primary_ids[0].upper(),
                     )
 
+    if strict_agent:
+        excluded_section_ids = {
+            source.provenance.section_id
+            for checkpoint in checkpoint_results
+            for source in checkpoint.sources
+        }
+        for discovered in _strict_discovery(engine, task, checkpoint_results, excluded_section_ids):
+            provenance = discovered.source.provenance
+            confidence = min(
+                0.99,
+                0.68
+                + 0.04 * min(len(discovered.signal_queries), 4)
+                + 0.03 * min(len(discovered.overlap_terms), 3)
+                + 0.08 * max(0.0, min(discovered.semantic_score, 1.0))
+                + (0.08 if discovered.best_rank <= 3 else 0.0),
+            )
+            query_sample = sorted(discovered.signal_queries, key=lambda value: (len(value), value))[
+                0
+            ]
+            reason = (
+                "strict cross-document discovery; "
+                f"category={discovered.category.value}; "
+                f"signals={','.join(sorted(discovered.signal_origins))}; "
+                f"query={query_sample[:160]!r}; "
+                f"channels={','.join(sorted(discovered.channels))}; "
+                f"semantic_score={discovered.semantic_score:.4f}; "
+                f"best_rank={discovered.best_rank}"
+            )
+            required = not discovered.optional
+            accepted = add(
+                discovered.source,
+                discovered.candidate_category,
+                reason,
+                relevance=(
+                    10.0 * len(discovered.signal_queries)
+                    + len(discovered.overlap_terms)
+                    - discovered.best_rank / 100.0
+                ),
+                confidence=confidence,
+                required=required,
+                coverage_categories=(discovered.category,),
+                checkpoint_id=primary_ids[0].upper() if primary_ids else None,
+            )
+            if required and not accepted:
+                unresolved_required.append(
+                    OmittedRequiredEvidence(
+                        category=discovered.category,
+                        reason=(
+                            "required strict cross-document discovery evidence was excluded "
+                            f"by context-pack filters; {reason}"
+                        ),
+                        confidence=confidence,
+                        document_id=provenance.document_id,
+                        document_path=provenance.document_path,
+                        section_id=provenance.section_id,
+                        checkpoint_id=primary_ids[0].upper() if primary_ids else None,
+                        start_line=provenance.start_line,
+                        end_line=provenance.end_line,
+                        range_sha256=provenance.range_sha256,
+                    )
+                )
+
     # Generic searches are conditional fallback, never unconditional pack pollution.
     folded_task = task.casefold()
     fallbacks: list[tuple[str, str, str]] = []
@@ -854,7 +1332,16 @@ def build_context_pack(
         "acceptance_or_verify": CoverageCategory.ACCEPTANCE,
     }
     for query, category, reason in fallbacks:
-        for rank, hit in enumerate(engine.search(query, limit=3, **filter_kwargs), start=1):
+        for rank, hit in enumerate(
+            engine.search(
+                query,
+                limit=3,
+                require_semantic=require_semantic,
+                _semantic_enabled=semantic_active,
+                **filter_kwargs,
+            ),
+            start=1,
+        ):
             fallback_category = fallback_coverage.get(category)
             add(
                 hit.source,

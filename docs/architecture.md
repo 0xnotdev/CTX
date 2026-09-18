@@ -29,8 +29,10 @@ are disposable navigation data and cannot replace source text.
 ```
 
 CLI and MCP contain input/output adaptation only. Both use `create_context_engine`; hybrid is
-active only when a configured model manifest and every artifact checksum verify. Otherwise the
-factory reports structural+lexical fallback. No adapter has a private retrieval path.
+active only when a configured model manifest and every artifact checksum verify. Ordinary
+non-strict operation otherwise reports explicit `LEXICAL_ONLY` structural+lexical mode. A
+`require_semantic` request (implied by `strict_agent`) fails closed through the same factory and
+engine with typed `SEMANTIC_RETRIEVAL_UNAVAILABLE`; no adapter has a private retrieval path.
 
 ## Parse and retrieval
 
@@ -68,21 +70,43 @@ each range location/hash. Complete sections require explicit opt-in.
 
 Context planning orders exact checkpoint/requirement, explicit refs, dependencies, checkpoint
 fields, interfaces/models, global normative constraints, task-specific error/security evidence,
-and semantic fallback. Generic auxiliary searches are conditional. Ambiguous graph records have
-no target and cannot be treated as certainty. Every selected item reports category, reason,
-relevance, confidence and authority. A requested checkpoint root is first and cannot be displaced;
-insufficient room produces `PRIMARY_REQUIREMENT_TOO_LARGE`. Checkpoint context can resolve its
-root in one document while retaining required cross-document graph targets.
+and semantic fallback. Generic auxiliary searches are conditional. In `STRICT_AGENT` mode it
+also derives at most sixteen deterministic discovery signals, in stable order, from task text,
+checkpoint title, goal/why/scope, dependencies, files/modules, interfaces/models, CLI behavior,
+acceptance, failures, security, verification, and normative requirement lines. The signals are
+deterministically grouped into at most four global hybrid probes across configured normative
+sources; one focused probe per normative document prevents a large document from hiding another
+behind the global cutoff. Results are deterministically fused by section and
+classified using source path/heading role, direct term/identifier overlap, and conservative
+semantic-score gates (with lower gates only for repeated query evidence). A role-named document
+is not required merely because vector search returned a top result. Material architecture,
+decision, current-state/progress, security, acceptance, verification,
+testing, dependency, and other normative constraints become required; bounded optional
+background/history/research neighbors remain optional. Conservative classification prevents
+generic normative hits from being indiscriminately declared relevant. No LLM participates.
+
+Ambiguous graph records have no target and cannot be treated as certainty. Every selected item
+reports category, reason, relevance, confidence and authority. A requested checkpoint root is
+first and cannot be displaced; insufficient room produces `PRIMARY_REQUIREMENT_TOO_LARGE`.
+Checkpoint context can resolve its root in one document while retaining required cross-document
+graph targets.
 
 Every pack reports top-level `COMPLETE`, `PARTIAL`, `AMBIGUOUS`, `CONFLICTING`, or
 `NOT_APPLICABLE` and explicit coverage for primary evidence, dependencies, architecture,
-security, acceptance, verification, and checkpoint descendants. Required evidence is derived
-from checkpoint structure/resolved graph edges or direct query-term coverage; optional neighbors
-do not make a pack partial. Each dropped required range has an actionable document, section,
-checkpoint/dependency where applicable, line range, and range hash. Ambiguities retain candidate
-source refs and conflicts remain compact refs. Status precedence is conflict, ambiguity, required
-omission, complete coverage, then not-applicable; callers must inspect the records rather than
-interpreting the enum as a substitute for source.
+security, acceptance, verification, and checkpoint descendants. Strict packs additionally report
+decisions, current state, testing, and other normative coverage when applicable. Required evidence
+is derived from checkpoint structure/resolved graph edges, direct query-term coverage, or strict
+materiality classification; optional neighbors do not make a pack partial. Each dropped required
+range has an actionable category/reason/confidence, document, section, checkpoint/dependency where
+applicable, line range, and range hash. Ambiguities retain candidate source refs and conflicts
+remain compact refs. Status precedence is conflict, ambiguity, required omission, complete
+coverage, then not-applicable; callers must inspect the records rather than interpreting the enum
+as a substitute for source.
+
+A production coding agent may begin only when retrieval metadata reports `STRICT_AGENT`,
+`HYBRID_SEMANTIC`, and an active `semantic` channel; status is `COMPLETE`; and required omissions,
+ambiguities, and conflicts are empty. Otherwise CTX directs more retrieval, a larger budget, or
+raw-Markdown fallback.
 
 ## Serialized token budgets
 
@@ -155,9 +179,16 @@ nor emit telemetry.
 
 Embedding identity includes provider, model, exact configured revision, aggregate artifact hash,
 dimensions and runtime version; algorithm metadata separately binds chunker and embedding-text
-versions. A mismatch invalidates vectors. The semantic matrix cache is immutable, bounded to four
-generation+identity+filter entries. Query vectors use a 128-entry identity+query+generation LRU.
-Generation changes make old entries unreachable; source response text is not cached.
+versions. A mismatch invalidates vectors. Before a required-semantic pack, CTX validates provider
+initialization, indexed identity/dimensions/algorithm metadata, one compatible source- and
+embedding-hash-bound finite vector per current chunk, and query execution. Missing/corrupt model,
+checksum/revision mismatch, provider failure, missing/stale/incompatible vectors, or semantic
+query failure becomes a typed machine-readable error rather than lexical fallback. Normal runtime
+remains local-only and never installs/downloads a model.
+
+The semantic matrix cache is immutable, bounded to four generation+identity+filter entries. Query
+vectors use a 128-entry identity+query+generation LRU. Generation changes make old entries
+unreachable; source response text is not cached.
 
 ## Security boundary and dependencies
 

@@ -46,6 +46,7 @@ class EmbeddingConfig(StrictModel):
     model: str = DEFAULT_MODEL
     revision: str = DEFAULT_REVISION
     model_dir: str | None = None
+    require_semantic: bool = False
 
 
 class WorkspaceConfig(StrictModel):
@@ -184,6 +185,7 @@ def save_config(root: Path, config: WorkspaceConfig) -> None:
         f"backend = {json.dumps(config.embedding.backend)}",
         f"model = {json.dumps(config.embedding.model)}",
         f"revision = {json.dumps(config.embedding.revision)}",
+        f"require_semantic = {str(config.embedding.require_semantic).lower()}",
     ]
     if config.embedding.model_dir is not None:
         lines.append(f"model_dir = {json.dumps(config.embedding.model_dir)}")

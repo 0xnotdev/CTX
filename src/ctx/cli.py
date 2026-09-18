@@ -112,9 +112,13 @@ def _engine(
     *,
     no_embeddings: bool = False,
     model_dir: Path | None = None,
+    require_semantic: bool | None = None,
 ) -> ContextEngine:
     return create_context_engine(
-        _root(root), embeddings_enabled=not no_embeddings, model_dir=model_dir
+        _root(root),
+        embeddings_enabled=not no_embeddings,
+        model_dir=model_dir,
+        require_semantic=require_semantic,
     )
 
 
@@ -424,18 +428,35 @@ def pack(
     allow_required_budget_expansion: Annotated[
         bool, typer.Option("--allow-required-budget-expansion")
     ] = False,
+    strict_agent: Annotated[
+        bool,
+        typer.Option("--strict-agent", help="Require strict cross-document agent completeness."),
+    ] = False,
+    require_semantic: Annotated[
+        bool,
+        typer.Option(
+            "--require-semantic", help="Fail unless compatible semantic retrieval is active."
+        ),
+    ] = False,
     json_output: Annotated[bool, typer.Option("--json")] = False,
 ) -> None:
     try:
         filters = _search_filters(
             document, authority_floor, authority, exclude_document, heading_prefix, scope
         )
-        with _engine(root, no_embeddings=no_embeddings, model_dir=model_dir) as engine:
+        with _engine(
+            root,
+            no_embeddings=no_embeddings,
+            model_dir=model_dir,
+            require_semantic=True if strict_agent or require_semantic else None,
+        ) as engine:
             _emit(
                 engine.get_context_pack(
                     task,
                     token_budget,
                     allow_required_budget_expansion=allow_required_budget_expansion,
+                    strict_agent=strict_agent,
+                    require_semantic=require_semantic,
                     **filters,
                 ),
                 json_output,
@@ -469,16 +490,25 @@ def checkpoint_context(
     allow_required_budget_expansion: Annotated[
         bool, typer.Option("--allow-required-budget-expansion")
     ] = False,
+    strict_agent: Annotated[bool, typer.Option("--strict-agent")] = False,
+    require_semantic: Annotated[bool, typer.Option("--require-semantic")] = False,
     json_output: Annotated[bool, typer.Option("--json")] = False,
 ) -> None:
     try:
-        with _engine(root, no_embeddings=no_embeddings, model_dir=model_dir) as engine:
+        with _engine(
+            root,
+            no_embeddings=no_embeddings,
+            model_dir=model_dir,
+            require_semantic=True if strict_agent or require_semantic else None,
+        ) as engine:
             _emit(
                 engine.get_checkpoint_context(
                     checkpoint_id,
                     document=document,
                     token_budget=budget,
                     allow_required_budget_expansion=allow_required_budget_expansion,
+                    strict_agent=strict_agent,
+                    require_semantic=require_semantic,
                 ),
                 json_output,
             )

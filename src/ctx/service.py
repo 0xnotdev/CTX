@@ -35,6 +35,7 @@ from ctx.models import (
     IndexStatus,
     OutlineEntry,
     ReferenceResult,
+    RetrievalMode,
     SearchHit,
     SourceExcerpt,
     SourceItem,
@@ -87,6 +88,41 @@ class ConcurrentGenerationError(RuntimeError):
     code = "INDEX_GENERATION_CHANGED"
 
 
+class SemanticRetrievalError(RuntimeError):
+    """Typed fail-closed error for a required semantic retrieval channel."""
+
+    code = "SEMANTIC_RETRIEVAL_UNAVAILABLE"
+
+    def __init__(
+        self,
+        reason: str,
+        detail: str,
+        *,
+        index_generation: int | None = None,
+        expected_identity: str | None = None,
+        indexed_identity: str | None = None,
+        active_channels: tuple[str, ...] = ("structural", "lexical"),
+    ):
+        self.reason = reason
+        self.detail = detail
+        self.index_generation = index_generation
+        self.expected_identity = expected_identity
+        self.indexed_identity = indexed_identity
+        self.active_channels = active_channels
+        super().__init__(f"{self.code}: {reason}: {detail}")
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "code": self.code,
+            "reason": self.reason,
+            "detail": self.detail,
+            "index_generation": self.index_generation,
+            "expected_identity": self.expected_identity,
+            "indexed_identity": self.indexed_identity,
+            "active_channels": list(self.active_channels),
+        }
+
+
 class ContextEngine:
     """Workspace-scoped facade; adapters must construct it via ``create_context_engine``."""
 
@@ -96,17 +132,121 @@ class ContextEngine:
         *,
         embedder: EmbeddingProvider | None = None,
         read_only: bool = False,
+        semantic_failure: SemanticRetrievalError | None = None,
     ):
         self.root = root.resolve(strict=True)
         self.config = load_config(self.root)
         self.store = SQLiteStore(database_path(self.root), read_only=read_only)
         self.embedder = embedder
+        self._semantic_failure = semantic_failure
         self._query_cache: OrderedDict[tuple[str, str, int], NDArray[np.float32]] = OrderedDict()
         self._cache_lock = threading.Lock()
 
     @property
     def active_channels(self) -> tuple[str, ...]:
         return ("structural", "lexical", "semantic") if self.embedder else ("structural", "lexical")
+
+    @property
+    def retrieval_mode(self) -> RetrievalMode:
+        return RetrievalMode.HYBRID_SEMANTIC if self.embedder else RetrievalMode.LEXICAL_ONLY
+
+    def _semantic_error(self, reason: str, detail: str) -> SemanticRetrievalError:
+        return SemanticRetrievalError(
+            reason,
+            detail,
+            index_generation=self.store.index_generation(),
+            expected_identity=self.embedder.identity if self.embedder else None,
+            indexed_identity=self.store.get_metadata("embedding_identity"),
+            active_channels=("structural", "lexical"),
+        )
+
+    def require_semantic_ready(self) -> None:
+        """Validate provider and vectors against the current atomic index generation."""
+        if self.embedder is None:
+            if self._semantic_failure is not None:
+                raise self._semantic_failure
+            raise self._semantic_error(
+                "PROVIDER_UNAVAILABLE", "no semantic embedding provider is initialized"
+            )
+
+        expected_identity = self.embedder.identity
+        indexed_identity = self.store.get_metadata("embedding_identity")
+        if indexed_identity != expected_identity:
+            raise self._semantic_error(
+                "IDENTITY_MISMATCH",
+                f"indexed embedding identity {indexed_identity!r} does not match provider",
+            )
+        indexed_dimensions = self.store.get_metadata("embedding_dimensions")
+        if indexed_dimensions != str(self.embedder.dimensions):
+            raise self._semantic_error(
+                "IDENTITY_MISMATCH",
+                f"indexed dimensions {indexed_dimensions!r} do not match provider "
+                f"dimensions {self.embedder.dimensions}",
+            )
+        for key, expected in (
+            ("embedding_model", expected_identity),
+            ("embedding_text_version", EMBEDDING_TEXT_VERSION),
+            ("chunker_version", CHUNKER_VERSION),
+        ):
+            actual = self.store.get_metadata(key)
+            if actual != expected:
+                raise self._semantic_error(
+                    "VECTOR_INDEX_STALE",
+                    f"{key}: indexed={actual!r}, runtime={expected!r}",
+                )
+
+        rows = self.store.connection.execute(
+            "SELECT c.id,c.source_sha256,c.embedding_sha256,e.embedding_identity,e.provider,"
+            "e.model_name,e.revision,e.artifact_sha256,e.runtime_version,e.dimensions,e.vector,"
+            "e.chunk_source_sha256,e.embedding_text_sha256 FROM search_chunks c "
+            "LEFT JOIN embeddings e ON e.chunk_id=c.id ORDER BY c.id"
+        ).fetchall()
+        if not rows:
+            raise self._semantic_error(
+                "VECTOR_INDEX_MISSING", "the current generation contains no semantic vectors"
+            )
+        if any(row["embedding_identity"] is None for row in rows):
+            present = sum(row["embedding_identity"] is not None for row in rows)
+            raise self._semantic_error(
+                "VECTOR_INDEX_MISSING",
+                f"semantic vectors are incomplete: {present}/{len(rows)}",
+            )
+        metadata = self.embedder.metadata
+        for row in rows:
+            if str(row["embedding_identity"]) != expected_identity:
+                raise self._semantic_error(
+                    "IDENTITY_MISMATCH", f"vector {row['id']} has a different identity"
+                )
+            if any(
+                str(row[column]) != metadata.get(key, "")
+                for column, key in (
+                    ("provider", "provider"),
+                    ("model_name", "model_name"),
+                    ("revision", "revision"),
+                    ("artifact_sha256", "artifact_sha256"),
+                    ("runtime_version", "runtime_version"),
+                )
+            ):
+                raise self._semantic_error(
+                    "IDENTITY_MISMATCH", f"vector {row['id']} provider metadata is incompatible"
+                )
+            if str(row["chunk_source_sha256"]) != str(row["source_sha256"]) or str(
+                row["embedding_text_sha256"]
+            ) != str(row["embedding_sha256"]):
+                raise self._semantic_error(
+                    "VECTOR_INDEX_STALE", f"vector {row['id']} is stale for its source chunk"
+                )
+            dimensions = int(row["dimensions"])
+            blob = bytes(row["vector"])
+            if dimensions != self.embedder.dimensions or len(blob) != dimensions * 4:
+                raise self._semantic_error(
+                    "VECTOR_INDEX_CORRUPT", f"vector {row['id']} has invalid dimensions or bytes"
+                )
+            vector = np.frombuffer(blob, dtype="<f4", count=dimensions)
+            if not np.isfinite(vector).all():
+                raise self._semantic_error(
+                    "VECTOR_INDEX_CORRUPT", f"vector {row['id']} contains non-finite values"
+                )
 
     def close(self) -> None:
         self.store.close()
@@ -517,6 +657,23 @@ class ContextEngine:
                         reason=f"missing vectors: {vector_count}/{self.store.chunk_count()}",
                     )
                 )
+        effective_channels = self.active_channels
+        effective_mode = self.retrieval_mode
+        if self.embedder is not None:
+            try:
+                self.require_semantic_ready()
+            except SemanticRetrievalError as error:
+                effective_channels = ("structural", "lexical")
+                effective_mode = RetrievalMode.LEXICAL_ONLY
+                if self.store.chunk_count() and not any(
+                    item.category is StatusCategory.EMBEDDINGS_STALE for item in reasons
+                ):
+                    reasons.append(
+                        StatusReason(
+                            category=StatusCategory.EMBEDDINGS_STALE,
+                            reason=f"{error.reason}: {error.detail}",
+                        )
+                    )
         category = reasons[0].category if reasons else StatusCategory.CLEAN
         return IndexStatus(
             index_generation=self.store.index_generation(),
@@ -533,7 +690,8 @@ class ContextEngine:
             checkpoint_version=CHECKPOINT_VERSION,
             retrieval_version=RETRIEVAL_VERSION,
             embedding_identity=self.store.get_metadata("embedding_identity") or "none",
-            active_channels=self.active_channels,
+            retrieval_mode=effective_mode,
+            active_channels=effective_channels,
         )
 
     def _validate_hits(self, hits: list[SearchHit]) -> list[SearchHit]:
@@ -719,8 +877,12 @@ class ContextEngine:
                 continue
         raise ConcurrentGenerationError("index changed repeatedly during lexical search")
 
-    def _query_embedding(self, query: str) -> NDArray[np.float32]:
+    def _query_embedding(
+        self, query: str, *, require_semantic: bool = False
+    ) -> NDArray[np.float32]:
         if self.embedder is None:
+            if require_semantic:
+                self.require_semantic_ready()
             raise RuntimeError("semantic channel is disabled")
         key = (self.embedder.identity, query, self.store.index_generation())
         with self._cache_lock:
@@ -728,7 +890,16 @@ class ContextEngine:
             if cached is not None:
                 self._query_cache.move_to_end(key)
                 return cached
-        value = self.embedder.embed_query(query)
+        try:
+            value = np.asarray(self.embedder.embed_query(query), dtype=np.float32)
+            if value.shape != (self.embedder.dimensions,) or not np.isfinite(value).all():
+                raise RuntimeError("embedding provider returned an invalid query vector")
+        except SemanticRetrievalError:
+            raise
+        except Exception as error:
+            if require_semantic:
+                raise self._semantic_error("QUERY_FAILED", str(error)) from error
+            raise
         value.setflags(write=False)
         with self._cache_lock:
             self._query_cache[key] = value
@@ -743,6 +914,7 @@ class ContextEngine:
         *,
         limit: int = 10,
         include_full_section: bool = False,
+        require_semantic: bool = False,
         **filter_args: object,
     ) -> list[SearchHit]:
         """Run only the installed verified-local semantic channel."""
@@ -750,17 +922,28 @@ class ContextEngine:
         if not query.strip():
             return []
         if self.embedder is None:
+            if require_semantic:
+                self.require_semantic_ready()
             return []
         bounded = min(max(limit, 1), self.config.limits.max_results)
         filters = self._filters(**filter_args)  # type: ignore[arg-type]
         with self.store.consistent_read():
-            hits = self.store.semantic_search(
-                self._query_embedding(query),
-                self.embedder.identity,
-                bounded,
-                filters=filters,
-                include_full_section=include_full_section,
-            )
+            if require_semantic:
+                self.require_semantic_ready()
+            try:
+                hits = self.store.semantic_search(
+                    self._query_embedding(query, require_semantic=require_semantic),
+                    self.embedder.identity,
+                    bounded,
+                    filters=filters,
+                    include_full_section=include_full_section,
+                )
+            except SemanticRetrievalError:
+                raise
+            except Exception as error:
+                if require_semantic:
+                    raise self._semantic_error("QUERY_FAILED", str(error)) from error
+                raise
             return self._validate_hits(hits)
 
     def search(
@@ -770,6 +953,8 @@ class ContextEngine:
         limit: int = 10,
         auto_sync: bool = False,
         include_full_section: bool = False,
+        require_semantic: bool = False,
+        _semantic_enabled: bool | None = None,
         **filter_args: object,
     ) -> list[SearchHit]:
         with self.store.consistent_read():
@@ -778,6 +963,8 @@ class ContextEngine:
                 limit=limit,
                 auto_sync=auto_sync,
                 include_full_section=include_full_section,
+                require_semantic=require_semantic,
+                _semantic_enabled=_semantic_enabled,
                 **filter_args,
             )
 
@@ -788,6 +975,8 @@ class ContextEngine:
         limit: int = 10,
         auto_sync: bool = False,
         include_full_section: bool = False,
+        require_semantic: bool = False,
+        _semantic_enabled: bool | None = None,
         **filter_args: object,
     ) -> list[SearchHit]:
         self._validate_query(query)
@@ -795,6 +984,8 @@ class ContextEngine:
             return []
         if auto_sync:
             self.sync_workspace()
+        if require_semantic:
+            self.require_semantic_ready()
         bounded = min(max(limit, 1), self.config.limits.max_results)
         candidates = min(max(bounded * 4, 20), self.config.limits.max_results)
         filters = self._filters(**filter_args)  # type: ignore[arg-type]
@@ -815,14 +1006,21 @@ class ContextEngine:
                 ("structural", structural),
                 ("bm25", lexical),
             ]
-            if self.embedder is not None:
-                semantic = self.store.semantic_search(
-                    self._query_embedding(query),
-                    self.embedder.identity,
-                    candidates,
-                    filters=filters,
-                    include_full_section=include_full_section,
-                )
+            if self.embedder is not None and _semantic_enabled is not False:
+                try:
+                    semantic = self.store.semantic_search(
+                        self._query_embedding(query, require_semantic=require_semantic),
+                        self.embedder.identity,
+                        candidates,
+                        filters=filters,
+                        include_full_section=include_full_section,
+                    )
+                except SemanticRetrievalError:
+                    raise
+                except Exception as error:
+                    if require_semantic:
+                        raise self._semantic_error("QUERY_FAILED", str(error)) from error
+                    raise
                 channels.append(("semantic", semantic))
             if self.store.index_generation() != start_generation:
                 continue
@@ -874,7 +1072,22 @@ class ContextEngine:
         document: str | None = None,
         token_budget: int = 15_000,
         allow_required_budget_expansion: bool = False,
+        strict_agent: bool = False,
+        require_semantic: bool = False,
     ) -> CheckpointContext:
+        semantic_required = (
+            strict_agent or require_semantic or self.config.embedding.require_semantic
+        )
+        semantic_active = False
+        if self.embedder is not None:
+            try:
+                self.require_semantic_ready()
+                semantic_active = True
+            except SemanticRetrievalError:
+                if semantic_required:
+                    raise
+        elif semantic_required:
+            self.require_semantic_ready()
         checkpoint = self.get_checkpoint(checkpoint_id, document=document)
         dependencies: list[ReferenceResult] = []
         references: list[ReferenceResult] = []
@@ -919,6 +1132,8 @@ class ContextEngine:
             limit=10,
             documents={checkpoint.metadata.document_id},
             authority_floor=Authority.REFERENCE,
+            require_semantic=semantic_required,
+            _semantic_enabled=semantic_active,
         ):
             if "security" in hit.source.text.casefold():
                 security.setdefault(
@@ -930,7 +1145,13 @@ class ContextEngine:
                     ),
                 )
         if not security:
-            for hit in self.search("security", limit=3, authority_floor=Authority.NORMATIVE):
+            for hit in self.search(
+                "security",
+                limit=3,
+                authority_floor=Authority.NORMATIVE,
+                require_semantic=semantic_required,
+                _semantic_enabled=semantic_active,
+            ):
                 security[hit.source.provenance.section_id] = SecurityContextItem(
                     source=hit.source,
                     applicability="semantic_candidate",
@@ -941,6 +1162,8 @@ class ContextEngine:
             f"Implement {checkpoint.metadata.checkpoint_id} — {checkpoint.metadata.title}",
             token_budget,
             allow_required_budget_expansion=allow_required_budget_expansion,
+            strict_agent=strict_agent,
+            require_semantic=semantic_required,
             _checkpoint_document=checkpoint.metadata.document_id,
         )
         unique_interfaces = {source.provenance.section_id: source for source in interfaces}
@@ -966,6 +1189,8 @@ class ContextEngine:
         token_budget: int,
         *,
         allow_required_budget_expansion: bool = False,
+        strict_agent: bool = False,
+        require_semantic: bool = False,
         _checkpoint_document: str | None = None,
         documents: set[str] | None = None,
         authority_floor: Authority | None = None,
@@ -980,7 +1205,12 @@ class ContextEngine:
             raise ValueError("task exceeds configured max_query_chars")
         if token_budget > self.config.limits.max_token_budget:
             raise ValueError("token_budget exceeds configured max_token_budget")
+        semantic_required = (
+            strict_agent or require_semantic or self.config.embedding.require_semantic
+        )
         with self.store.consistent_read():
+            if semantic_required:
+                self.require_semantic_ready()
             return build_context_pack(
                 self,
                 task,
@@ -994,6 +1224,8 @@ class ContextEngine:
                     scope=scope,
                 ),
                 allow_required_budget_expansion=allow_required_budget_expansion,
+                strict_agent=strict_agent,
+                require_semantic=semantic_required,
                 checkpoint_document=_checkpoint_document,
             )
 
@@ -1079,6 +1311,20 @@ class ContextEngine:
         return item
 
 
+def _provider_failure(error: RuntimeError) -> tuple[str, str]:
+    detail = str(error)
+    folded = detail.casefold()
+    if "checksum mismatch" in folded:
+        return "MODEL_CHECKSUM_MISMATCH", detail
+    if "revision" in folded or "identity" in folded:
+        return "MODEL_IDENTITY_MISMATCH", detail
+    if "invalid or missing model manifest" in folded:
+        return "MODEL_MISSING", detail
+    if "dimensions" in folded:
+        return "PROVIDER_INCOMPATIBLE", detail
+    return "PROVIDER_INITIALIZATION_FAILED", detail
+
+
 def create_context_engine(
     root: Path,
     *,
@@ -1086,21 +1332,46 @@ def create_context_engine(
     embeddings_enabled: bool = True,
     model_dir: Path | None = None,
     read_only: bool = False,
+    require_semantic: bool | None = None,
 ) -> ContextEngine:
-    """Single engine factory for CLI/MCP with explicit verified-local fallback semantics."""
+    """Single engine factory with typed strict failure and explicit non-strict fallback."""
     resolved = root.resolve(strict=True)
+    config = load_config(resolved)
+    required = config.embedding.require_semantic if require_semantic is None else require_semantic
     if embedder is not None:
         return ContextEngine(resolved, embedder=embedder, read_only=read_only)
-    config = load_config(resolved)
     if not embeddings_enabled or config.embedding.backend == "disabled":
-        return ContextEngine(resolved, embedder=None, read_only=read_only)
+        detail = (
+            "semantic retrieval was explicitly disabled"
+            if not embeddings_enabled
+            else "the workspace embedding backend is disabled"
+        )
+        disabled_failure = SemanticRetrievalError("DISABLED", detail)
+        if required:
+            raise disabled_failure
+        return ContextEngine(
+            resolved,
+            embedder=None,
+            read_only=read_only,
+            semantic_failure=disabled_failure,
+        )
     configured_dir = Path(config.embedding.model_dir) if config.embedding.model_dir else model_dir
+    provider_failure: SemanticRetrievalError | None = None
     try:
         provider = FastEmbedProvider(
             config.embedding.model,
             revision=config.embedding.revision,
             cache_dir=configured_dir,
         )
-    except RuntimeError:
+    except RuntimeError as error:
         provider = None
-    return ContextEngine(resolved, embedder=provider, read_only=read_only)
+        reason, detail = _provider_failure(error)
+        provider_failure = SemanticRetrievalError(reason, detail)
+    if required and provider_failure is not None:
+        raise provider_failure
+    return ContextEngine(
+        resolved,
+        embedder=provider,
+        read_only=read_only,
+        semantic_failure=provider_failure,
+    )

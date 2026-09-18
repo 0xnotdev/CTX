@@ -10,7 +10,7 @@ from ctx.models import SearchHit, StrictModel
 
 RRF_K = 60
 MAX_SPANS_PER_SECTION = 3
-RETRIEVAL_VERSION = "ctx-rrf-span-diversity:4"
+RETRIEVAL_VERSION = "ctx-strict-cross-document-semantic:5"
 
 
 class QueryClassification(StrictModel):

@@ -15,7 +15,7 @@ from mcp.client.stdio import stdio_client
 from ctx.config import add_document_config, initialize_workspace
 from ctx.embeddings import FastEmbedProvider
 from ctx.evaluation import RetrievalCase, _channel_metrics
-from ctx.models import Authority
+from ctx.models import Authority, CompletenessStatus, CoverageCategory
 from ctx.service import ContextEngine
 
 pytestmark = pytest.mark.production_embedding
@@ -66,6 +66,58 @@ def test_real_bge_low_overlap_tail_beats_lexical_decoy(
         pack = engine.get_context_pack(query, 2_000)
         assert pack.items
         assert pack.serialized_estimated_tokens <= pack.token_budget
+
+
+def test_real_bge_strict_agent_discovers_low_overlap_normative_documents(
+    tmp_path: Path,
+) -> None:
+    provider = _provider()
+    initialize_workspace(tmp_path)
+    documents = {
+        "SPEC.md": (
+            "# CP-17 — Seamless authorization transition\n"
+            "## Goal\nReplace request authorization without interrupting service.\n"
+            "## Files/modules\n`src/router.py` and `PolicyEpoch`.\n"
+        ),
+        "DECISIONS.md": (
+            "# ADR-42 — Shadow handoff\n"
+            "Keep the successor dark beside the incumbent until quorum receipts make the "
+            "ownership flip irreversible.\n"
+        ),
+        "PROGRESS.md": (
+            "# Current delivery state\n"
+            "The legacy evaluator owns live traffic and a parallel successor does not yet exist.\n"
+        ),
+        "SECURITY.md": (
+            "# Threat boundary\n"
+            "Candidate rule bundles remain inert hostile data throughout staging.\n"
+        ),
+        "TESTING.md": (
+            "# Release qualification\n"
+            "A canary matrix proves uninterrupted reads through ownership transfer and rollback.\n"
+        ),
+    }
+    for path, text in documents.items():
+        (tmp_path / path).write_text(text, encoding="utf-8")
+        add_document_config(tmp_path, path, Authority.NORMATIVE)
+    with ContextEngine(tmp_path, embedder=provider) as engine:
+        engine.sync_workspace()
+        pack = engine.get_context_pack(
+            "Implement CP-17", 20_000, strict_agent=True, require_semantic=True
+        )
+        assert pack.completeness_status is CompletenessStatus.COMPLETE
+        paths = {item.source.provenance.document_path for item in pack.items}
+        assert {"DECISIONS.md", "PROGRESS.md", "SECURITY.md", "TESTING.md"} <= paths
+        covered = {
+            item.category for item in pack.category_coverage if item.required and item.evidence
+        }
+        assert {
+            CoverageCategory.DECISIONS,
+            CoverageCategory.CURRENT_STATE,
+            CoverageCategory.SECURITY,
+            CoverageCategory.TESTING,
+        } <= covered
+        assert pack.retrieval_metadata["retrieval_mode"] == "HYBRID_SEMANTIC"
 
 
 def test_real_model_stdio_mcp_remains_offline_under_socket_denial(tmp_path: Path) -> None:

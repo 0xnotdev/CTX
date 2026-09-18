@@ -2,6 +2,17 @@
 
 All notable changes are documented here. This project follows semantic versioning.
 
+## Unreleased
+
+### Fixed
+
+- Added strict agent-pack discovery of materially relevant normative architecture, decisions,
+  current state/progress, security, testing, and other cross-document evidence. Required budget or
+  filter omissions now prevent `COMPLETE` with exact actionable provenance.
+- Added fail-closed `require_semantic` parity across config, service, CLI, and MCP. Strict agent
+  packs validate the local provider and current compatible vector generation; explicit non-strict
+  fallback is labeled `LEXICAL_ONLY`.
+
 ## 1.0.0 — 2026-09-18
 
 ### Changed

@@ -1,11 +1,16 @@
 # Agent guidance for ctx workspaces
 
-Use `ctx pack "<task or checkpoint>" --token-budget <budget> --json` (or MCP
-`get_context_pack`) before specification-driven work. For a checkpoint, prefer
-`ctx checkpoint context CP-N --budget ... --json`; retrieve important IDs again with
-`ctx section`/`ctx lines` when complete normative wording matters. Require `COMPLETE` and inspect
-category coverage; do not proceed through `PARTIAL`, `AMBIGUOUS`, `CONFLICTING`,
-`AMBIGUOUS_CHECKPOINT`, `CONTEXT_BUDGET_TOO_SMALL`, or `PRIMARY_REQUIREMENT_TOO_LARGE`.
+Before production implementation, use
+`ctx pack "<task or checkpoint>" --strict-agent --require-semantic --token-budget <budget> --json`
+(or MCP `get_context_pack` with `strict_agent=true`, `require_semantic=true`). For a checkpoint,
+prefer `ctx checkpoint context CP-N --strict-agent --require-semantic --budget ... --json`;
+retrieve important IDs again with `ctx section`/`ctx lines` when complete normative wording
+matters. Begin implementation only when retrieval metadata says `STRICT_AGENT` and
+`HYBRID_SEMANTIC`, active channels include `semantic`, status is `COMPLETE`, and required
+omissions, ambiguities, and conflicts are empty. Otherwise retrieve more, increase budget, or
+read raw Markdown. Never proceed through `PARTIAL`, `AMBIGUOUS`, `CONFLICTING`,
+`AMBIGUOUS_CHECKPOINT`, `SEMANTIC_RETRIEVAL_UNAVAILABLE`, `CONTEXT_BUDGET_TOO_SMALL`, or
+`PRIMARY_REQUIREMENT_TOO_LARGE`.
 
 Original Markdown is always authoritative. Embeddings, chunks, graph edges, metadata, context
 pack reasons, checkpoint JSON artifacts, and generated summaries are navigation-only. Never
