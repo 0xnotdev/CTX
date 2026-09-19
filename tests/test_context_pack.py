@@ -1,11 +1,34 @@
 from pathlib import Path
+from typing import Any
 
+import numpy as np
 import pytest
 
 from ctx.config import add_document_config, initialize_workspace
 from ctx.context_pack import PrimaryRequirementTooLarge
-from ctx.models import Authority
+from ctx.models import Authority, CompletenessStatus
 from ctx.service import ContextEngine
+
+
+class _FlatEmbedding:
+    dimensions = 4
+    identity = "ctx/test-conflict-scope:1:4"
+    metadata = {
+        "provider": "ctx",
+        "model_name": "test-conflict-scope",
+        "revision": "1",
+        "artifact_sha256": "deterministic-test-only",
+        "runtime_version": "1",
+    }
+
+    def count_tokens(self, text: str) -> int:
+        return len(text.split())
+
+    def embed_documents(self, texts: list[str]) -> np.ndarray[Any, np.dtype[np.float32]]:
+        return np.ones((len(texts), self.dimensions), dtype=np.float32)
+
+    def embed_query(self, query: str) -> np.ndarray[Any, np.dtype[np.float32]]:
+        return np.ones(self.dimensions, dtype=np.float32)
 
 
 def test_pack_prioritizes_requirement_dependencies_models_and_acceptance(tmp_path: Path) -> None:
@@ -98,3 +121,120 @@ def test_possible_conflict_is_conservative_and_source_labeled(tmp_path: Path) ->
             Authority.HISTORICAL,
         }
         assert all(not hasattr(item, "text") for item in conflict.sources)
+        assert all(item.start_line == item.end_line for item in conflict.sources)
+
+
+def test_conflict_detection_ignores_broad_protocol_mentions_with_unrelated_modal(
+    tmp_path: Path,
+) -> None:
+    symbols = (
+        "AlphaExecutor",
+        "BetaSink",
+        "GammaAdapter",
+        "DeltaPolicyEngine",
+        "EpsilonOperator",
+        "ZetaCoverageTracker",
+        "EtaRegressionStore",
+        "ThetaResourceState",
+    )
+    initialize_workspace(tmp_path)
+    protocol_types = "\n".join(f"class {symbol}(Protocol): ..." for symbol in symbols)
+    (tmp_path / "protocol.md").write_text(
+        "# Protocol catalogue\n"
+        "The support contracts below are normative. Implementations MUST NOT replace "
+        "support payloads with untyped dictionaries.\n"
+        "```python\n"
+        f"{protocol_types}\n"
+        "```\n",
+        encoding="utf-8",
+    )
+    add_document_config(tmp_path, "protocol.md", Authority.NORMATIVE)
+    for index, symbol in enumerate(symbols, start=1):
+        path = f"component-{index}.md"
+        (tmp_path / path).write_text(
+            f"# {symbol} delivery\n{symbol} must process its assigned request.\n",
+            encoding="utf-8",
+        )
+        add_document_config(tmp_path, path, Authority.NORMATIVE)
+
+    with ContextEngine(tmp_path) as engine:
+        engine.index_workspace()
+        pack = engine.get_context_pack(" ".join(symbols), 30_000)
+        selected = "\n".join(item.source.text for item in pack.items)
+        assert all(symbol in selected for symbol in symbols)
+        assert pack.completeness_status is CompletenessStatus.COMPLETE
+        assert not pack.possible_conflicts
+
+
+def test_conflict_detection_attributes_enabled_disabled_to_governed_object(
+    tmp_path: Path,
+) -> None:
+    initialize_workspace(tmp_path)
+    (tmp_path / "catalog.md").write_text(
+        "# SharedHarness catalog\n"
+        "SharedHarness integration is in scope. Every enabled operator has positive and "
+        "negative applicability coverage.\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "verifier.md").write_text(
+        "# SharedHarness verifier\n"
+        "SharedHarness integration is in scope. Verifier fixtures produce survivors when "
+        "checks disabled.\n",
+        encoding="utf-8",
+    )
+    add_document_config(tmp_path, "catalog.md", Authority.NORMATIVE)
+    add_document_config(tmp_path, "verifier.md", Authority.NORMATIVE)
+
+    with ContextEngine(tmp_path) as engine:
+        engine.index_workspace()
+        pack = engine.get_context_pack("SharedHarness enabled disabled", 8_000)
+        selected = "\n".join(item.source.text for item in pack.items)
+        assert "enabled operator" in selected
+        assert "checks disabled" in selected
+        assert pack.completeness_status is CompletenessStatus.COMPLETE
+        assert not pack.possible_conflicts
+
+
+@pytest.mark.parametrize(
+    ("positive", "negative", "identifier", "task"),
+    (
+        (
+            "# NetworkPolicy rule\nNetworkPolicy must allow ingress.\n",
+            "# Old NetworkPolicy rule\nNetworkPolicy must not allow ingress.\n",
+            "NetworkPolicy",
+            "NetworkPolicy ingress",
+        ),
+        (
+            "# FeatureSwitch state\nFeatureSwitch is enabled for default routing.\n",
+            "# Old FeatureSwitch state\nFeatureSwitch is disabled for default routing.\n",
+            "FeatureSwitch",
+            "FeatureSwitch default routing",
+        ),
+        (
+            "# DataExport permission\nDataExport is allowed for guest access.\n",
+            "# Old DataExport permission\nDataExport is prohibited for guest access.\n",
+            "DataExport",
+            "DataExport guest access",
+        ),
+        (
+            "# AuditTrail requirement\nAuditTrail is required for release.\n",
+            "# Old AuditTrail requirement\nAuditTrail is forbidden for release.\n",
+            "AuditTrail",
+            "AuditTrail release",
+        ),
+    ),
+)
+def test_strict_conflict_detection_still_blocks_genuine_contradictions(
+    tmp_path: Path, positive: str, negative: str, identifier: str, task: str
+) -> None:
+    initialize_workspace(tmp_path)
+    (tmp_path / "current.md").write_text(positive, encoding="utf-8")
+    (tmp_path / "conflict.md").write_text(negative, encoding="utf-8")
+    add_document_config(tmp_path, "current.md", Authority.NORMATIVE)
+    add_document_config(tmp_path, "conflict.md", Authority.HISTORICAL)
+
+    with ContextEngine(tmp_path, embedder=_FlatEmbedding()) as engine:
+        engine.sync_workspace()
+        pack = engine.get_context_pack(task, 8_000, strict_agent=True, require_semantic=True)
+        assert pack.completeness_status is CompletenessStatus.CONFLICTING
+        assert any(conflict.identifier == identifier for conflict in pack.possible_conflicts)

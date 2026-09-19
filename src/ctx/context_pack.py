@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import re
@@ -28,6 +29,7 @@ from ctx.models import (
     ResolutionStatus,
     RetrievalMode,
     SourceItem,
+    SourceRef,
 )
 from ctx.retrieval import classify_query
 
@@ -183,53 +185,411 @@ def serialized_agent_response(pack: ContextPack) -> dict[str, object]:
     }
 
 
+_IDENTIFIER_PATTERN = re.compile(
+    r"\bCP-\d+\b"
+    r"|\b(?:[A-Z][a-z0-9]+){2,}\b"
+    r"|\b[A-Z][A-Z0-9]+(?:_[A-Z0-9]+)+\b"
+    r"|\b[A-Za-z_][\w-]*(?:\.[\w-]+)+(?:@\d+)?\b"
+)
+_WORD_PATTERN = re.compile(r"[A-Za-z][A-Za-z0-9_-]*")
+_MODAL_NEGATIVE = re.compile(r"\b(?:must|shall|should|may)\s+not\b|\bmust\s+never\b", re.I)
+_MODAL_POSITIVE = re.compile(r"\b(?:must|shall|should)\b(?!\s+(?:not|never)\b)", re.I)
+_ENABLED = re.compile(r"\benabled\b", re.I)
+_DISABLED = re.compile(r"\bdisabled\b", re.I)
+_ALLOWED = re.compile(r"\ballowed\b", re.I)
+_PROHIBITED = re.compile(r"\b(?:prohibited|disallowed)\b", re.I)
+_REQUIRED = re.compile(r"\brequired\b", re.I)
+_FORBIDDEN = re.compile(r"\bforbidden\b", re.I)
+_LEADING_FIELD = re.compile(r"^[-*+]\s*(?:\*\*)?[^:\n]{1,80}:(?:\*\*)?\s*")
+_TRAILING_QUALIFIER = re.compile(
+    r"\b(?:for|in|during|when|under|on|within|against|by|to)\b.*", re.I
+)
+_STOP_SUBJECT_WORDS = frozenset(
+    {
+        "a",
+        "an",
+        "and",
+        "any",
+        "are",
+        "as",
+        "be",
+        "below",
+        "by",
+        "each",
+        "every",
+        "for",
+        "from",
+        "has",
+        "have",
+        "if",
+        "in",
+        "is",
+        "it",
+        "its",
+        "no",
+        "of",
+        "or",
+        "that",
+        "the",
+        "their",
+        "them",
+        "these",
+        "this",
+        "those",
+        "to",
+        "with",
+    }
+)
+_PROPERTY_STOP_WORDS = frozenset({"a", "an", "be", "is", "are", "the", "to"})
+_SUBJECT_WINDOW_CHARS = 96
+
+
+@dataclass(frozen=True)
+class _IdentifierSpan:
+    text: str
+    start: int
+    end: int
+
+
+@dataclass(frozen=True)
+class _ClauseSpan:
+    text: str
+    start: int
+    end: int
+
+
+@dataclass(frozen=True)
+class _PolarityMarker:
+    family: str
+    polarity: int
+    label: str
+    start: int
+    end: int
+
+
+@dataclass(frozen=True)
+class _Assertion:
+    subject: str
+    subject_key: str
+    property_key: str
+    family: str
+    polarity: int
+    marker_label: str
+    source_ref: SourceRef
+
+
 def _identifiers(text: str) -> set[str]:
-    patterns = (
-        r"\bCP-\d+\b",
-        r"\b(?:[A-Z][a-z0-9]+){2,}\b",
-        r"\b[A-Z][A-Z0-9]+(?:_[A-Z0-9]+)+\b",
-        r"\b[A-Za-z_][\w-]*(?:\.[\w-]+)+(?:@\d+)?\b",
-    )
-    return {match.group(0) for pattern in patterns for match in re.finditer(pattern, text)}
+    return {match.group(0) for match in _IDENTIFIER_PATTERN.finditer(text)}
 
 
-def _opposition(left: str, right: str) -> str | None:
-    pairs = (
-        (r"\bmust\s+not\b", r"\bmust\b(?!\s+not)"),
-        (r"\benabled\b", r"\bdisabled\b"),
-        (r"\ballowed\b", r"\bprohibited\b"),
-        (r"\brequired\b", r"\bforbidden\b"),
+def _identifier_spans(text: str) -> tuple[_IdentifierSpan, ...]:
+    return tuple(
+        _IdentifierSpan(match.group(0), match.start(), match.end())
+        for match in _IDENTIFIER_PATTERN.finditer(text)
     )
-    for positive, negative in pairs:
-        if (re.search(positive, left, re.I) and re.search(negative, right, re.I)) or (
-            re.search(negative, left, re.I) and re.search(positive, right, re.I)
-        ):
-            return f"deterministic contradictory phrase pair: {positive} / {negative}"
+
+
+def _clean_inline(text: str) -> str:
+    return re.sub(r"[`*_\[\](){}<>]", " ", text)
+
+
+def _singularize(word: str) -> str:
+    if len(word) > 3 and word.endswith("ies"):
+        return word[:-3] + "y"
+    if len(word) > 3 and word.endswith("s") and not word.endswith("ss"):
+        return word[:-1]
+    return word
+
+
+def _normalize_key(text: str) -> str:
+    words = [
+        _singularize(match.group(0).casefold())
+        for match in _WORD_PATTERN.finditer(_clean_inline(text).replace("/", " "))
+    ]
+    useful = [word for word in words if word not in _STOP_SUBJECT_WORDS]
+    return " ".join(useful)
+
+
+def _normalize_property(text: str) -> str:
+    words = [
+        _singularize(match.group(0).casefold())
+        for match in _WORD_PATTERN.finditer(_clean_inline(text).replace("/", " "))
+    ]
+    useful = [word for word in words if word not in _PROPERTY_STOP_WORDS]
+    return " ".join(useful) or "state"
+
+
+def _line_payload(text: str) -> tuple[str, int]:
+    match = _LEADING_FIELD.match(text.strip())
+    if match is None:
+        stripped = text.lstrip()
+        return stripped, len(text) - len(stripped)
+    stripped_prefix = text[: len(text) - len(text.lstrip())]
+    leading = len(stripped_prefix) + match.end()
+    return text[leading:].lstrip(), leading + len(text[leading:]) - len(text[leading:].lstrip())
+
+
+def _clause_spans(text: str) -> tuple[_ClauseSpan, ...]:
+    clauses: list[_ClauseSpan] = []
+    in_fence = False
+    offset = 0
+    for line in text.splitlines(keepends=True):
+        line_without_newline = line.rstrip("\r\n")
+        stripped = line_without_newline.strip()
+        fence = stripped.startswith("```") or stripped.startswith("~~~")
+        if fence:
+            in_fence = not in_fence
+            offset += len(line)
+            continue
+        if in_fence or not stripped or stripped.startswith("#"):
+            offset += len(line)
+            continue
+        payload, payload_offset = _line_payload(line_without_newline)
+        base = offset + payload_offset
+        for part in re.finditer(r"[^.!?;]+(?:[.!?;]+|$)", payload):
+            raw = part.group(0)
+            start = part.start()
+            end = part.end()
+            while start < end and raw[start - part.start()].isspace():
+                start += 1
+            while end > start and raw[end - part.start() - 1].isspace():
+                end -= 1
+            if end > start:
+                clauses.append(_ClauseSpan(payload[start:end], base + start, base + end))
+        offset += len(line)
+    return tuple(clauses)
+
+
+def _markers(text: str) -> tuple[_PolarityMarker, ...]:
+    specs: tuple[tuple[str, int, str, re.Pattern[str]], ...] = (
+        ("modal", -1, "MUST NOT", _MODAL_NEGATIVE),
+        ("modal", 1, "MUST", _MODAL_POSITIVE),
+        ("state", 1, "enabled", _ENABLED),
+        ("state", -1, "disabled", _DISABLED),
+        ("permission", 1, "allowed", _ALLOWED),
+        ("permission", -1, "prohibited", _PROHIBITED),
+        ("requirement", 1, "required", _REQUIRED),
+        ("requirement", -1, "forbidden", _FORBIDDEN),
+    )
+    found: list[_PolarityMarker] = []
+    occupied: list[tuple[int, int]] = []
+    for family, polarity, label, pattern in specs:
+        for match in pattern.finditer(text):
+            span = (match.start(), match.end())
+            if any(
+                span[0] < used_end and span[1] > used_start for used_start, used_end in occupied
+            ):
+                continue
+            found.append(_PolarityMarker(family, polarity, label, span[0], span[1]))
+            occupied.append(span)
+    return tuple(sorted(found, key=lambda item: (item.start, item.end, item.label)))
+
+
+def _nearest_identifier_before(
+    identifiers: Sequence[_IdentifierSpan], marker: _PolarityMarker
+) -> _IdentifierSpan | None:
+    before = [item for item in identifiers if item.end <= marker.start]
+    if not before:
+        return None
+    candidate = before[-1]
+    if marker.start - candidate.end > _SUBJECT_WINDOW_CHARS:
+        return None
+    return candidate
+
+
+def _heading_subject(source: SourceItem, marker: _PolarityMarker, clause_text: str) -> str | None:
+    if clause_text[: marker.start].strip():
+        return None
+    heading_ids = _identifiers(" ".join(source.provenance.heading_path))
+    if len(heading_ids) == 1:
+        return next(iter(heading_ids))
     return None
+
+
+def _word_before(text: str, end: int) -> str | None:
+    words = [match.group(0) for match in _WORD_PATTERN.finditer(text[:end])]
+    for word in reversed(words):
+        key = _normalize_key(word)
+        if key:
+            return word
+    return None
+
+
+def _word_after(text: str, start: int) -> str | None:
+    for match in _WORD_PATTERN.finditer(text[start:]):
+        word = match.group(0)
+        if _normalize_key(word):
+            return word
+    return None
+
+
+def _modal_common_subject(text: str, marker: _PolarityMarker) -> str | None:
+    prefix = _clean_inline(text[: marker.start])
+    prefix = re.split(r"\b(?:and|but|while|when)\b|[,()]", prefix)[-1]
+    words = [match.group(0) for match in _WORD_PATTERN.finditer(prefix)]
+    useful = [word for word in words if _normalize_key(word)]
+    if not useful:
+        return None
+    return " ".join(useful[:3])
+
+
+def _state_subject(text: str, marker: _PolarityMarker) -> str | None:
+    before = _word_before(text, marker.start)
+    after = _word_after(text, marker.end)
+    if before and before.casefold() not in {"is", "are", "be", "been", "when", "if"}:
+        return before
+    return after
+
+
+def _assertion_subject(
+    source: SourceItem,
+    clause: _ClauseSpan,
+    marker: _PolarityMarker,
+    identifiers: Sequence[_IdentifierSpan],
+) -> str | None:
+    identifier = _nearest_identifier_before(identifiers, marker)
+    if identifier is not None:
+        return identifier.text
+    heading_subject = _heading_subject(source, marker, clause.text)
+    if heading_subject is not None:
+        return heading_subject
+    if marker.family == "state":
+        return _state_subject(clause.text, marker)
+    return _modal_common_subject(clause.text, marker)
+
+
+def _assertion_property(text: str, marker: _PolarityMarker, subject: str) -> str:
+    if marker.family == "state":
+        suffix = text[marker.end :]
+        qualifier = _TRAILING_QUALIFIER.search(suffix)
+        if qualifier is not None:
+            return _normalize_property(qualifier.group(0))
+        return "state"
+    suffix = text[marker.end :]
+    suffix = re.sub(r"^\s+(?:be|to|that)\b", " ", suffix, flags=re.I)
+    subject_key = _normalize_key(subject)
+    prop = _normalize_property(suffix)
+    if prop == subject_key:
+        return "state"
+    return prop
+
+
+def _span_ref(source: SourceItem, start: int, end: int) -> SourceRef:
+    p = source.provenance
+    text = source.text
+    span_text = text[start:end]
+    prefix = text[:start]
+    through = text[:end]
+    start_line = p.start_line + prefix.count("\n")
+    end_line = p.start_line + through.count("\n")
+    start_line_prefix = prefix.rsplit("\n", 1)[-1]
+    end_line_prefix = through.rsplit("\n", 1)[-1]
+    start_column = len(start_line_prefix)
+    end_column = len(end_line_prefix)
+    if start_line == p.start_line:
+        start_column += p.start_column
+    if end_line == p.start_line:
+        end_column += p.start_column
+    return SourceRef(
+        document_id=p.document_id,
+        document_path=p.document_path,
+        section_id=p.section_id,
+        heading_path=p.heading_path,
+        start_line=start_line,
+        end_line=end_line,
+        start_column=start_column,
+        end_column=end_column,
+        section_sha256=p.section_sha256,
+        range_sha256=hashlib.sha256(span_text.encode("utf-8")).hexdigest(),
+        authority=p.authority,
+        priority=p.priority,
+        index_generation=p.index_generation,
+    )
+
+
+def _assertions(source: SourceItem) -> tuple[_Assertion, ...]:
+    assertions: list[_Assertion] = []
+    for clause in _clause_spans(source.text):
+        identifiers = _identifier_spans(clause.text)
+        for marker in _markers(clause.text):
+            subject = _assertion_subject(source, clause, marker, identifiers)
+            if subject is None:
+                continue
+            subject_key = _normalize_key(subject)
+            if not subject_key:
+                continue
+            property_key = _assertion_property(clause.text, marker, subject)
+            assertions.append(
+                _Assertion(
+                    subject=subject,
+                    subject_key=subject_key,
+                    property_key=property_key,
+                    family=marker.family,
+                    polarity=marker.polarity,
+                    marker_label=marker.label,
+                    source_ref=_span_ref(source, clause.start, clause.end),
+                )
+            )
+    return tuple(assertions)
+
+
+def _conflict_reason(left: _Assertion, right: _Assertion) -> str | None:
+    if left.family != right.family or left.polarity == right.polarity:
+        return None
+    if left.subject_key != right.subject_key:
+        return None
+    if left.property_key != right.property_key:
+        return None
+    return (
+        "deterministic contradictory assertion: "
+        f"subject={left.subject_key!r}; property={left.property_key!r}; "
+        f"markers={left.marker_label}/{right.marker_label}"
+    )
 
 
 def _possible_conflicts(items: Sequence[ContextPackItem]) -> tuple[PossibleConflict, ...]:
     conflicts: list[PossibleConflict] = []
-    for index, left in enumerate(items):
-        left_ids = _identifiers(left.source.text)
-        for right in items[index + 1 :]:
-            overlap = sorted(left_ids & _identifiers(right.source.text))
-            reason = _opposition(left.source.text, right.source.text)
-            if overlap and reason:
-                conflicts.append(
-                    PossibleConflict(
-                        identifier=overlap[0],
-                        reason=reason,
-                        sources=(left.source.ref, right.source.ref),
+    assertions_by_item = tuple(_assertions(item.source) for item in items)
+    seen: set[tuple[str, str, str, str, str]] = set()
+    for index, left_assertions in enumerate(assertions_by_item):
+        for right_assertions in assertions_by_item[index + 1 :]:
+            for left in left_assertions:
+                for right in right_assertions:
+                    reason = _conflict_reason(left, right)
+                    if reason is None:
+                        continue
+                    key = (
+                        left.subject_key,
+                        left.property_key,
+                        left.source_ref.range_sha256,
+                        right.source_ref.range_sha256,
+                        reason,
                     )
-                )
-                if len(conflicts) >= 10:
-                    return tuple(conflicts)
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    conflicts.append(
+                        PossibleConflict(
+                            identifier=left.subject,
+                            reason=reason,
+                            sources=(left.source_ref, right.source_ref),
+                        )
+                    )
+                    if len(conflicts) >= 10:
+                        return tuple(conflicts)
     return tuple(conflicts)
 
 
 def _counter_name(counter: TokenCounter) -> str:
     return counter.identity
+
+
+def _source_refs_overlap(left: SourceRef, right: SourceRef) -> bool:
+    return (
+        left.section_id == right.section_id
+        and left.start_line <= right.end_line
+        and right.start_line <= left.end_line
+    )
 
 
 def _candidate_range_key(candidate: _Candidate) -> tuple[str, int, int]:
@@ -278,7 +638,8 @@ def _coverage_state(
             )
         )
 
-    conflict_hashes = {source.range_sha256 for conflict in conflicts for source in conflict.sources}
+    conflict_sources = tuple(source for conflict in conflicts for source in conflict.sources)
+    conflict_hashes = {source.range_sha256 for source in conflict_sources}
     base_categories = (
         CoverageCategory.PRIMARY,
         CoverageCategory.DEPENDENCIES,
@@ -318,7 +679,13 @@ def _coverage_state(
         ]
         category_omissions = [item for item in unresolved if item.category is category]
         category_ambiguous = [item for item in ambiguous if item.category is category]
-        category_conflicting = any(item.range_sha256 in conflict_hashes for item in evidence)
+        category_conflicting = any(
+            item.range_sha256 in conflict_hashes
+            or any(
+                _source_refs_overlap(item, conflict_source) for conflict_source in conflict_sources
+            )
+            for item in evidence
+        )
         required = any(candidate.required for candidate in applicable) or bool(
             category_omissions or category_ambiguous
         )
